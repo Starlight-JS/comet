@@ -69,11 +69,8 @@ impl GCInfoTable {
             GC_TABLE.table = GC_TABLE.map.start().cast();
         }
         let mut v = ManuallyDrop::new(vec![0u16; Self::MAX_INDEX as usize]);
-        *GC_TABLE.type_id_map.as_mut_ptr() = Vec::from_raw_parts(
-            v.as_mut_ptr().cast::<AtomicU16>(),
-            Self::MAX_INDEX as _,
-            Self::MAX_INDEX as _,
-        );
+        *GC_TABLE.type_id_map.as_mut_ptr() =
+            Vec::from_raw_parts(v.as_mut_ptr().cast::<AtomicU16>(), v.len(), v.capacity());
     }
     pub(crate) fn add_gc_info_type_id(&mut self, type_id: TypeId, info: GCInfo) -> GCInfoIndex {
         unsafe {
