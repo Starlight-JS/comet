@@ -1,0 +1,12 @@
+[package]
+name = "slgc"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+parking_lot = "0.11.1"
+libc = "0.2.98"
+modular-bitfield = "0.11.2"
+generic_static = "0.2.0"
