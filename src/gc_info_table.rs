@@ -8,18 +8,16 @@ use std::{
     sync::atomic::AtomicU16,
 };
 
-use parking_lot::{lock_api::RawMutex, Mutex};
-
 use crate::{
     internal::{
-        finalize_trait::FInalizationCallback, gc_info::GCInfoIndex, trace_trait::TraceCallback,
+        finalize_trait::FinalizationCallback, gc_info::GCInfoIndex, trace_trait::TraceCallback,
     },
     mmap::Mmap,
 };
 
 /// GCInfo contains metadata for objects.
 pub struct GCInfo {
-    pub finalize: Option<FInalizationCallback>,
+    pub finalize: Option<FinalizationCallback>,
     pub trace: TraceCallback,
 }
 
@@ -29,18 +27,12 @@ pub struct GCInfoTable {
     table: *mut GCInfo,
     type_id_map: MaybeUninit<Vec<AtomicU16>>,
     current_index: AtomicU16,
-    limit: GCInfoIndex,
-    table_mutex: Mutex<()>,
-    type_id_map_len: AtomicU16,
 }
 
 pub(crate) static mut GC_TABLE: GCInfoTable = GCInfoTable {
-    table_mutex: Mutex::const_new(parking_lot::RawMutex::INIT, ()),
     table: null_mut(),
     current_index: AtomicU16::new(1),
-    limit: 1 << 14,
     type_id_map: MaybeUninit::uninit(),
-    type_id_map_len: AtomicU16::new(0),
     #[cfg(not(wasm))]
     map: Mmap::uninit(),
 };

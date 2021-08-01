@@ -1,8 +1,8 @@
-pub type FInalizationCallback = extern "C" fn(*mut u8);
+pub type FinalizationCallback = extern "C" fn(*mut u8);
 
 pub trait FinalizeTrait<T> {
     const NON_TRIVIAL_DTOR: bool = core::mem::needs_drop::<T>();
-    const CALLBACK: Option<FInalizationCallback> = if Self::NON_TRIVIAL_DTOR {
+    const CALLBACK: Option<FinalizationCallback> = if Self::NON_TRIVIAL_DTOR {
         Some(Self::finalize)
     } else {
         None
