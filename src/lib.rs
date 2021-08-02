@@ -2,6 +2,7 @@
 use std::mem::size_of;
 
 use gc_info_table::GCInfo;
+use internal::BLOCK_SIZE;
 /// Just like C's offsetof.
 ///
 /// The magic number 0x4000 is insignificant. We use it to avoid using NULL, since
@@ -31,13 +32,17 @@ macro_rules! logln_if {
         }
     };
 }
+pub mod allocation_config;
 pub mod block;
 pub mod block_allocator;
 pub mod gc_info_table;
 pub mod gcref;
-pub mod global_heap;
+pub mod global_allocator;
 pub mod header;
+pub mod heap;
 pub mod internal;
+pub mod large_space;
+pub mod local_allocator;
 pub mod local_heap;
 pub mod mmap;
 pub mod safepoint;
@@ -59,5 +64,33 @@ impl GCPlatform {
     pub unsafe fn initialize_wasm(
         _gc_info_table_mem: &'static mut [u8; size_of::<GCInfo>() * (1 << 14)],
     ) {
+    }
+}
+
+pub struct Config {
+    pub heap_growth_factor: f64,
+    pub heap_growth_threshold: f64,
+    pub large_heap_growth_factor: f64,
+    pub large_heap_growth_threshold: f64,
+    pub dump_size_classes: bool,
+    pub size_class_progression: f64,
+    pub heap_size: usize,
+    pub large_threshold: usize,
+    pub block_threshold: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            heap_growth_factor: 1.5,
+            heap_growth_threshold: 0.9,
+            large_heap_growth_factor: 1.5,
+            large_heap_growth_threshold: 0.9,
+            dump_size_classes: false,
+            size_class_progression: 1.4,
+            heap_size: 1 * 1024 * 1024 * 1024,
+            large_threshold: 4 * 1024 * 1024, // 4MB
+            block_threshold: (4 * 1024 * 1024) / BLOCK_SIZE,
+        }
     }
 }

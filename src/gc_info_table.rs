@@ -8,12 +8,11 @@ use std::{
     sync::atomic::AtomicU16,
 };
 
-use crate::{
-    internal::{
-        finalize_trait::FinalizationCallback, gc_info::GCInfoIndex, trace_trait::TraceCallback,
-    },
-    mmap::Mmap,
+use crate::internal::{
+    finalize_trait::FinalizationCallback, gc_info::GCInfoIndex, trace_trait::TraceCallback,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::mmap::Mmap;
 
 /// GCInfo contains metadata for objects.
 pub struct GCInfo {

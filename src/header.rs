@@ -1,6 +1,6 @@
 use crate::internal::gc_info::GCInfoIndex;
 use modular_bitfield::prelude::*;
-use std::mem::size_of;
+use std::{mem::size_of, sync::atomic::AtomicU16};
 
 // HeapObjectHeader contains meta data per object and is prepended to each
 // object.
@@ -39,6 +39,9 @@ pub struct HeapObjectHeader {
 pub const ALLOCATION_GRANULARITY: usize = size_of::<usize>();
 
 impl HeapObjectHeader {
+    pub fn set_free(&mut self) {
+        self.encoded_low = 0;
+    }
     #[inline(always)]
     pub fn payload(&self) -> *const u8 {
         (self as *const Self as usize + size_of::<Self>()) as _
@@ -58,16 +61,32 @@ impl HeapObjectHeader {
         self.encoded_high.set_size(size as _);
     }
     #[inline(always)]
-    pub fn is_marked(self) -> bool {
-        self.encoded_high.marked()
+    pub fn is_grey(self) -> bool {
+        self.encoded_high.state() == CellState::PossiblyGrey
     }
     #[inline(always)]
-    pub fn set_marked(&mut self) -> bool {
-        if self.is_marked() {
+    pub fn is_white(self) -> bool {
+        self.encoded_high.state() == CellState::DefinitelyWhite
+    }
+    #[inline(always)]
+    pub fn is_black(self) -> bool {
+        self.encoded_high.state() == CellState::PossiblyBlack
+    }
+
+    #[inline(always)]
+    pub fn set_state(&mut self, current: CellState, new: CellState) -> bool {
+        if self.encoded_high.state() != current {
             return false;
         }
-        self.encoded_high.set_marked(true);
+        self.encoded_high.set_state(new);
         true
+    }
+    #[inline(always)]
+    pub fn force_set_state(&mut self, state: CellState) {
+        self.encoded_high.set_state(state);
+    }
+    pub fn set_gc_info(&mut self, index: GCInfoIndex) {
+        self.encoded_low = index;
     }
     #[inline(always)]
     pub fn is_free(&self) -> bool {
@@ -78,6 +97,37 @@ impl HeapObjectHeader {
 #[bitfield(bits = 16)]
 #[derive(Clone, Copy)]
 pub struct EncodedHigh {
-    size: B15,
-    marked: bool,
+    size: B14,
+    state: CellState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum CellState {
+    DefinitelyWhite = 0,
+    PossiblyGrey,
+    PossiblyBlack,
+}
+
+impl Specifier for CellState {
+    type Bytes = u8;
+    const BITS: usize = 2;
+    type InOut = Self;
+    fn from_bytes(
+        bytes: Self::Bytes,
+    ) -> Result<Self::InOut, modular_bitfield::error::InvalidBitPattern<Self::Bytes>> {
+        Ok(match bytes {
+            0 => Self::DefinitelyWhite,
+            1 => Self::PossiblyGrey,
+            2 => Self::PossiblyBlack,
+            _ => unreachable!(),
+        })
+    }
+    fn into_bytes(input: Self::InOut) -> Result<Self::Bytes, modular_bitfield::error::OutOfBounds> {
+        match input {
+            Self::DefinitelyWhite => Ok(0),
+            Self::PossiblyGrey => Ok(1),
+            Self::PossiblyBlack => Ok(2),
+        }
+    }
 }

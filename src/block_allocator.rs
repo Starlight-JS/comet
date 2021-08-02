@@ -1,11 +1,13 @@
 use std::sync::atomic::Ordering;
 
-use crate::{block::Block, internal::BLOCK_SIZE, mmap::Mmap};
+use crate::{
+    block::Block,
+    internal::{block_list::AtomicBlockList, BLOCK_SIZE},
+    mmap::Mmap,
+};
 
 pub struct BlockAllocator {
-    #[cfg(feature = "threaded")]
-    lock: ReentrantMutex,
-    free_blocks: Vec<*mut Block>,
+    free_blocks: AtomicBlockList,
 
     //pub bitmap: SpaceBitmap<16>,
     pub data_bound: *mut u8,
@@ -21,11 +23,9 @@ impl BlockAllocator {
         let map = Mmap::new(size);
 
         let this = Self {
-            #[cfg(feature = "threaded")]
-            lock: ReentrantMutex::new(),
             data: map.aligned(),
             data_bound: map.end(),
-            free_blocks: Vec::new(),
+            free_blocks: AtomicBlockList::new(),
 
             mmap: map,
         };
@@ -35,31 +35,22 @@ impl BlockAllocator {
     }
 
     /// Get a new block aligned to `BLOCK_SIZE`.
-    pub fn get_block(&mut self) -> Option<*mut Block> {
-        if self.free_blocks.is_empty() {
-            return self.build_block();
-        }
-
-        let block = self
-            .free_blocks
-            .pop()
-            .map(|x| {
-                self.mmap.commit(x as *mut u8, BLOCK_SIZE);
-                Block::new(x as *mut u8);
+    pub fn get_block(&self) -> *mut Block {
+        match self.free_blocks.take_free() {
+            x if x.is_null() => self.build_block().expect("Out of memory"),
+            x => {
+                self.mmap.commit(x as _, BLOCK_SIZE);
+                Block::new(x as _);
                 x
-            })
-            .or_else(|| self.build_block());
-        if block.is_none() {
-            panic!("OOM");
+            }
         }
-        block
     }
 
     pub fn is_in_space(&self, object: *const u8) -> bool {
         self.mmap.start() < object as *mut u8 && object <= self.data_bound
     }
     #[allow(unused_unsafe)]
-    fn build_block(&mut self) -> Option<*mut Block> {
+    fn build_block(&self) -> Option<*mut Block> {
         unsafe {
             let data = as_atomic!(&self.data;AtomicUsize);
             let mut old = data.load(Ordering::Relaxed);
@@ -83,20 +74,22 @@ impl BlockAllocator {
 
     /// Return a collection of blocks.
     pub fn return_blocks(&mut self, blocks: impl Iterator<Item = *mut Block>) {
-        blocks.for_each(|block| {
+        blocks.for_each(|block| unsafe {
             self.mmap.dontneed(block as *mut u8, BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
-            self.free_blocks.push(block);
+            self.free_blocks.add_free(block);
         });
     }
     pub fn return_block(&mut self, block: *mut Block) {
         self.mmap.dontneed(block as *mut u8, BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
-        self.free_blocks.push(block);
+        unsafe {
+            self.free_blocks.add_free(block);
+        }
     }
 
     /// Return the number of unallocated blocks.
     pub fn available_blocks(&self) -> usize {
         let nblocks = ((self.data_bound as usize) - (self.data as usize)) / BLOCK_SIZE;
 
-        nblocks + self.free_blocks.len()
+        nblocks + self.free_blocks.count()
     }
 }

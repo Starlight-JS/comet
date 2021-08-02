@@ -1,6 +1,10 @@
 use std::{num::NonZeroU16, ptr::null_mut};
 
-use crate::internal::BLOCK_SIZE;
+use crate::{
+    gc_info_table::GC_TABLE,
+    header::HeapObjectHeader,
+    internal::{space_bitmap::SpaceBitmap, BLOCK_SIZE},
+};
 
 pub struct FreeList {
     pub(super) next: *mut FreeEntry,
@@ -31,6 +35,7 @@ impl FreeList {
         unsafe {
             let ptr = ptr.cast::<FreeEntry>();
             (*ptr).next = self.next;
+            (*ptr.cast::<HeapObjectHeader>()).set_free();
             self.next = ptr;
         }
     }
@@ -38,7 +43,7 @@ impl FreeList {
 
 #[repr(C)]
 pub struct FreeEntry {
-    preserved: u64,
+    preserved: usize,
     next: *mut Self,
 }
 // A block is a page-aligned container for heap-allocated objects.
@@ -160,4 +165,50 @@ impl Block {
     pub fn offset(&self, offset: usize) -> usize {
         self.begin() + offset
     }
+
+    pub fn sweep(&mut self, bitmap: &SpaceBitmap<16>) -> SweepResult {
+        let mut freelist = FreeList::new();
+        let mut free = 0;
+        let mut empty = true;
+        let table = unsafe { &GC_TABLE };
+        self.walk(|cell| unsafe {
+            let header = cell.cast::<HeapObjectHeader>();
+
+            if (*header).is_free() {
+                debug_assert!(!bitmap.test(header.cast()));
+                free += 1;
+                freelist.add(header.cast());
+            } else {
+                debug_assert!(bitmap.test(header.cast()));
+                if (*header).set_state(
+                    crate::header::CellState::PossiblyBlack,
+                    crate::header::CellState::DefinitelyWhite,
+                ) {
+                    empty = false;
+                } else {
+                    bitmap.clear(header.cast());
+                    let info = table.get_gc_info((*header).get_gc_info_index());
+                    if let Some(callback) = info.finalize {
+                        callback((*header).payload() as _);
+                    }
+                    free += 1;
+                    freelist.add(header.cast());
+                }
+            }
+        });
+        if free == 0 {
+            SweepResult::Full
+        } else if free > 0 && empty {
+            SweepResult::Empty
+        } else {
+            SweepResult::Reusable
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SweepResult {
+    Empty,
+    Full,
+    Reusable,
 }

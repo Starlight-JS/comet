@@ -1,3 +1,3 @@
-# Comet GC
+# Comet 
 
 General purpose garbage collector library. 

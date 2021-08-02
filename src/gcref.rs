@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     marker::PhantomData,
     ops::{Deref, DerefMut},
     ptr::NonNull,
@@ -62,5 +63,11 @@ impl UntypedGcRef {
     ) -> GcRef<T> {
         self.cast::<T>()
             .unwrap_or_else(|| unsafe { core::hint::unreachable_unchecked() })
+    }
+}
+
+impl fmt::Debug for UntypedGcRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "UntypedGcRef({:p})", self.header)
     }
 }
