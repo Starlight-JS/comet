@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     f32::MAX,
     ptr::{null_mut, NonNull},
 };
@@ -7,11 +8,12 @@ use crate::{
     gc_info_table::GCInfo,
     gcref::UntypedGcRef,
     global_allocator::{
-        round_up, size_class_to_index, GlobalAllocator, NUM_SIZE_CLASSES, PRECISE_CUTOFF,
+        round_up, size_class_to_index, GlobalAllocator, LARGE_CUTOFF, NUM_SIZE_CLASSES,
+        PRECISE_CUTOFF,
     },
     header::HeapObjectHeader,
     heap::Heap,
-    internal::{gc_info::GCInfoIndex, space_bitmap::SpaceBitmap},
+    internal::{gc_info::GCInfoIndex, space_bitmap::SpaceBitmap, stack_bounds::StackBounds},
     local_allocator::LocalAllocator,
 };
 use atomic::Atomic;
@@ -35,6 +37,8 @@ pub struct LocalHeap {
     pub(crate) global_heap: *mut GlobalAllocator,
     pub(crate) allocators: Box<[Option<LocalAllocator>]>,
     pub(crate) main_thread_parked: bool,
+    pub(crate) bounds: StackBounds,
+    pub(crate) last_sp: Cell<*mut u8>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -69,6 +73,11 @@ impl LocalHeap {
                 prev: null_mut(),
                 next: null_mut(),
                 main_thread_parked: false,
+                bounds: StackBounds {
+                    origin: null_mut(),
+                    bound: null_mut(),
+                },
+                last_sp: Cell::new(null_mut()),
                 allocators: vec![None; NUM_SIZE_CLASSES].into_boxed_slice(),
                 is_main: false,
                 state: Atomic::new(ThreadState::Running),
@@ -82,19 +91,23 @@ impl LocalHeap {
         size: usize,
     ) -> Option<UntypedGcRef> {
         let size = round_up(size, 16);
-        let mem = if size <= PRECISE_CUTOFF {
+        let mut is_large = false;
+        let mem = if size <= LARGE_CUTOFF {
             match self.allocators[size_class_to_index(size)] {
                 Some(ref mut allocator) => allocator.allocate(),
                 None => self.allocate_raw_small_slow(size),
             }
         } else {
+            is_large = true;
             (*self.global_heap).large_allocation(size)
         };
         if !mem.is_null() {
             let cell = mem.cast::<HeapObjectHeader>();
             (*cell).force_set_state(crate::header::CellState::DefinitelyWhite);
             (*cell).set_gc_info(gc_info);
-            (*self.space_bitmap).set(cell.cast());
+            if !is_large {
+                (*self.space_bitmap).set(cell.cast());
+            }
             Some(UntypedGcRef {
                 header: NonNull::new_unchecked(cell),
             })
@@ -142,23 +155,50 @@ impl LocalHeap {
             if !self.try_perform_collection() {
                 self.main_thread_parked = true;
             }
+            let result = self.allocate_raw(gc_info, size);
+            if result.is_some() {
+                self.main_thread_parked = false;
+                return result.unwrap();
+            }
         }
-        let result = self.allocate_raw(gc_info, size);
-        if result.is_some() {
-            self.main_thread_parked = false;
-            return result.unwrap();
-        }
+
         eprintln!("LocalHeap: allocation failed");
         std::process::abort();
     }
 
-    pub fn safepoint(&self) {
+    pub fn safepoint(&self) -> bool {
         let current = self.state.load(atomic::Ordering::Relaxed);
         if current == ThreadState::SafepointRequested {
             self.safepoint_slow_path();
+            true
+        } else {
+            false
         }
     }
-    pub(crate) fn sweep(&mut self) {
+
+    pub(crate) fn retain_blocks(&mut self) {
+        for alloc in self
+            .allocators
+            .iter_mut()
+            .filter(|x| x.is_some())
+            .map(|x| x.as_mut().unwrap())
+        {
+            if !alloc.current_block.is_null() {
+                alloc.unavailable.push(alloc.current_block);
+                alloc.current_block = null_mut();
+            }
+
+            while !alloc.unavailable.is_empty() {
+                let block = alloc.unavailable.pop();
+                unsafe {
+                    (*self.global_heap).free_blocks[size_class_to_index(alloc.cell_size as _)]
+                        .add_free(block);
+                }
+            }
+        }
+    }
+    pub(crate) fn sweep(&mut self) -> usize {
+        let mut nblocks = 0;
         for alloc in self
             .allocators
             .iter_mut()
@@ -171,17 +211,20 @@ impl LocalHeap {
 
             while !alloc.unavailable.is_empty() {
                 let block = alloc.unavailable.pop();
+                println!("sweep block (local) {:p}", block);
                 unsafe {
                     match (*block).sweep(&(*self.global_heap).live_bitmap) {
                         crate::block::SweepResult::Empty => {
                             (*self.global_heap).block_allocator.return_block(block);
                         }
                         crate::block::SweepResult::Full => {
+                            nblocks += 1;
                             (*self.global_heap).unavail_blocks
                                 [size_class_to_index(alloc.cell_size as _)]
                             .add_free(block);
                         }
                         crate::block::SweepResult::Reusable => {
+                            nblocks += 1;
                             (*self.global_heap).free_blocks
                                 [size_class_to_index(alloc.cell_size as _)]
                             .add_free(block);
@@ -190,7 +233,7 @@ impl LocalHeap {
                 }
             }
         }
-        {}
+        nblocks
     }
     pub fn is_parked(&self) -> bool {
         let state = self.state.load(atomic::Ordering::Relaxed);
@@ -262,6 +305,7 @@ impl LocalHeap {
     fn safepoint_slow_path(&self) {
         if self.is_main {
             unsafe {
+                self.last_sp.set(approximate_stack_pointer());
                 (*self.heap).collect_garbage();
             }
         } else {
@@ -275,6 +319,7 @@ impl LocalHeap {
                     atomic::Ordering::Relaxed
                 )
                 .is_ok());
+            self.last_sp.set(approximate_stack_pointer());
             unsafe {
                 (*self.heap).safepoint().wait_in_safepoint();
             }
@@ -317,6 +362,7 @@ impl LocalHeap {
     pub fn try_perform_collection(&self) -> bool {
         unsafe {
             if self.is_main {
+                self.last_sp.set(approximate_stack_pointer());
                 (*self.heap).collect_garbage();
                 return true;
             } else {
@@ -367,4 +413,10 @@ impl LocalHeap {
             }
         }
     }
+}
+#[inline(always)]
+pub fn approximate_stack_pointer() -> *mut u8 {
+    let mut result = null_mut();
+    result = &mut result as *mut *mut u8 as *mut u8;
+    result
 }

@@ -111,13 +111,13 @@ impl GlobalSafepoint {
 
     pub fn iterate(&self, mut f: impl FnMut(*mut LocalHeap)) {
         unsafe {
-            let g = self.local_heaps_mutex.lock();
+            // let g = self.local_heaps_mutex.lock();
             let mut cur = *self.local_heaps_head.get();
             while !cur.is_null() {
                 f(cur);
                 cur = (*cur).next;
             }
-            drop(g);
+            //drop(g);
         }
     }
     pub fn contains_local_heap(&self, local_heap: *mut LocalHeap) -> bool {
@@ -158,8 +158,10 @@ impl GlobalSafepoint {
             let mut local_heap = *self.local_heaps_head.get();
             while !local_heap.is_null() {
                 if (*local_heap).is_main && !stop_main_thread {
+                    local_heap = (*local_heap).next;
                     continue;
                 }
+
                 let expected = (*local_heap).state.load(atomic::Ordering::Relaxed);
                 loop {
                     let new_state = if expected == ThreadState::Parked {
@@ -186,9 +188,11 @@ impl GlobalSafepoint {
                         break;
                     }
                 }
+
                 local_heap = (*local_heap).next;
             }
         }
+
         self.barrier
             .wait_until_running_threads_in_safepoint(running);
     }
@@ -206,6 +210,7 @@ impl GlobalSafepoint {
             let mut local_heap = *self.local_heaps_head.get();
             while !local_heap.is_null() {
                 if (*local_heap).is_main && !stop_main_thread {
+                    local_heap = (*local_heap).next;
                     continue;
                 }
                 // We transition both ParkedSafepointRequested and Safepoint states to

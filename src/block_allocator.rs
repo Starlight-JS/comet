@@ -75,11 +75,15 @@ impl BlockAllocator {
     /// Return a collection of blocks.
     pub fn return_blocks(&mut self, blocks: impl Iterator<Item = *mut Block>) {
         blocks.for_each(|block| unsafe {
+            (*block).allocated = 0;
             self.mmap.dontneed(block as *mut u8, BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
             self.free_blocks.add_free(block);
         });
     }
     pub fn return_block(&mut self, block: *mut Block) {
+        unsafe {
+            (*block).allocated = 0;
+        }
         self.mmap.dontneed(block as *mut u8, BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
         unsafe {
             self.free_blocks.add_free(block);

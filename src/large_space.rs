@@ -1,3 +1,5 @@
+use std::ptr::null_mut;
+
 use crate::{gc_info_table::GC_TABLE, header::HeapObjectHeader};
 use parking_lot::{lock_api::RawMutex, RawMutex as Mutex};
 
@@ -81,7 +83,11 @@ impl PreciseAllocation {
     pub fn sweep(&mut self) -> bool {
         let cell = self.cell();
         unsafe {
-            if (*cell).is_white() {
+            if (*cell).set_state(
+                crate::header::CellState::PossiblyBlack,
+                crate::header::CellState::DefinitelyWhite,
+            ) {
+            } else {
                 self.has_valid_cell = false;
 
                 let info = GC_TABLE.get_gc_info((*cell).get_gc_info_index());
@@ -90,11 +96,6 @@ impl PreciseAllocation {
                 }
 
                 return false;
-            } else {
-                assert!((*cell).set_state(
-                    crate::header::CellState::PossiblyBlack,
-                    crate::header::CellState::DefinitelyWhite
-                ));
             }
         }
         true
@@ -158,17 +159,38 @@ impl LargeObjectSpace {
             large_space_mutex: Mutex::INIT,
         }
     }
-
-    pub fn sweep(&mut self) {
+    #[inline]
+    pub fn contains(&self, pointer: *const u8) -> *mut HeapObjectHeader {
+        unsafe {
+            if self.allocations.is_empty() {
+                return null_mut();
+            }
+            if (**self.allocations.first().unwrap()).above_lower_bound(pointer as _)
+                && (**self.allocations.last().unwrap()).below_upper_bound(pointer as _)
+            {
+                let prec = PreciseAllocation::from_cell(pointer as _);
+                match self.allocations.binary_search_by(|a| a.cmp(&prec)) {
+                    Ok(ix) => (*self.allocations[ix]).cell(),
+                    _ => null_mut(),
+                }
+            } else {
+                null_mut()
+            }
+        }
+    }
+    pub fn sweep(&mut self) -> usize {
+        let mut alive = 0;
         self.allocations.retain(|allocation| unsafe {
             let allocation = &mut **allocation;
-            if allocation.sweep() {
+            if !allocation.sweep() {
                 allocation.destroy();
                 false
             } else {
+                alive += allocation.cell_size();
                 true
             }
         });
+        alive
     }
     /// Sort allocations before consrvative scan.
     pub fn prepare_for_conservative_scan(&mut self) {

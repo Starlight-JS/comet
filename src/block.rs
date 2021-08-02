@@ -56,9 +56,8 @@ pub struct FreeEntry {
 #[repr(C, align(16))]
 pub struct Block {
     pub next: *mut Self,
+    pub allocated: u32,
 
-    /// Is this block actually allocated?
-    pub allocated: bool,
     pub cell_size: NonZeroU16,
     pub freelist: FreeList,
 
@@ -81,7 +80,7 @@ impl Block {
             debug_assert!(ptr as usize % BLOCK_SIZE == 0);
             ptr.write(Self {
                 next: null_mut(),
-                allocated: false,
+                allocated: 0,
 
                 freelist: FreeList::new(),
                 cell_size: NonZeroU16::new_unchecked(u16::MAX),
@@ -93,7 +92,7 @@ impl Block {
     }
     #[inline]
     pub fn is_in_block(&self, p: *const u8) -> bool {
-        if self.allocated {
+        if self.allocated == 0xdeadbeef {
             let b = self.begin();
             let e = b + BLOCK_SIZE;
             b < p as usize && p as usize <= e
@@ -121,7 +120,7 @@ impl Block {
         debug_assert!(cell_size >= 16, "Block cell size should be aligned to 16");
         unsafe {
             self.cell_size = NonZeroU16::new_unchecked(cell_size);
-
+            self.allocated = 0xdeadbeef;
             let mut freelist = FreeList::new();
             self.walk(|cell| {
                 freelist.add(cell);
@@ -180,6 +179,7 @@ impl Block {
                 freelist.add(header.cast());
             } else {
                 debug_assert!(bitmap.test(header.cast()));
+
                 if (*header).set_state(
                     crate::header::CellState::PossiblyBlack,
                     crate::header::CellState::DefinitelyWhite,

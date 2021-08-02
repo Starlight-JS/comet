@@ -44,6 +44,7 @@ pub mod internal;
 pub mod large_space;
 pub mod local_allocator;
 pub mod local_heap;
+pub mod marking;
 pub mod mmap;
 pub mod safepoint;
 pub mod visitor;
@@ -77,13 +78,15 @@ pub struct Config {
     pub heap_size: usize,
     pub large_threshold: usize,
     pub block_threshold: usize,
+    pub verbose: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            verbose: false,
             heap_growth_factor: 1.5,
-            heap_growth_threshold: 0.9,
+            heap_growth_threshold: 0.78,
             large_heap_growth_factor: 1.5,
             large_heap_growth_threshold: 0.9,
             dump_size_classes: false,

@@ -17,7 +17,7 @@ const SIZE_STEP: usize = 16;
 pub const fn round_up(x: usize, y: usize) -> usize {
     ((x) + (y - 1)) & !(y - 1)
 }
-const LARGE_CUTOFF: usize = ((BLOCK_SIZE - size_of::<Block>()) / 2) & !(SIZE_STEP - 1);
+pub const LARGE_CUTOFF: usize = ((BLOCK_SIZE - size_of::<Block>()) / 2) & !(SIZE_STEP - 1);
 const BLOCK_PAYLOAD: usize = BLOCK_SIZE - size_of::<Block>();
 fn generate_size_classes(dump_size_classes: bool, sz_class_progression: f64) -> Vec<usize> {
     let mut result = vec![];
@@ -148,9 +148,9 @@ pub struct GlobalAllocator {
     pub(crate) free_blocks: Box<[AtomicBlockList]>,
     pub(crate) unavail_blocks: Box<[AtomicBlockList]>,
     pub(crate) block_allocator: BlockAllocator,
-    large_space: LargeObjectSpace,
+    pub(crate) large_space: LargeObjectSpace,
     pub(crate) live_bitmap: SpaceBitmap<16>,
-    config: AllocationConfig,
+    pub(crate) config: AllocationConfig,
     pub(crate) size_class_for_size_step: Box<[usize]>,
 }
 
@@ -190,39 +190,55 @@ impl GlobalAllocator {
             cell.cast()
         }
     }
-    pub(crate) fn sweep(&mut self) {
+    pub(crate) fn sweep(&mut self) -> (usize, usize) {
         unsafe {
-            for (index, class) in self.free_blocks.iter_mut().enumerate() {
-                let new_list = AtomicBlockList::new();
+            let mut nblocks = 0;
+            for index in 0..NUM_SIZE_CLASSES {
+                let list = std::mem::replace(&mut self.free_blocks[index], AtomicBlockList::new());
+                let unavail =
+                    std::mem::replace(&mut self.unavail_blocks[index], AtomicBlockList::new());
                 loop {
-                    let block = class.take_free();
+                    let block = list.take_free();
                     if block.is_null() {
                         break;
                     }
+
                     match (*block).sweep(&self.live_bitmap) {
                         SweepResult::Empty => self.block_allocator.return_block(block),
-                        SweepResult::Full => self.unavail_blocks[index].add_free(block),
-                        SweepResult::Reusable => new_list.add_free(block),
+                        SweepResult::Full => {
+                            nblocks += 1;
+                            self.unavail_blocks[index].add_free(block)
+                        }
+                        SweepResult::Reusable => {
+                            nblocks += 1;
+                            self.free_blocks[index].add_free(block)
+                        }
                     }
                 }
-                *class = new_list;
-            }
-            for (index, class) in self.unavail_blocks.iter_mut().enumerate() {
-                let new_list = AtomicBlockList::new();
-                loop {
-                    let block = class.take_free();
-                    if block.is_null() {
-                        break;
-                    }
-                    match (*block).sweep(&self.live_bitmap) {
-                        SweepResult::Empty => self.block_allocator.return_block(block),
-                        SweepResult::Reusable => self.free_blocks[index].add_free(block),
-                        SweepResult::Full => new_list.add_free(block),
+                {
+                    loop {
+                        let block = unavail.take_free();
+                        if block.is_null() {
+                            break;
+                        }
+
+                        match (*block).sweep(&self.live_bitmap) {
+                            SweepResult::Empty => self.block_allocator.return_block(block),
+                            SweepResult::Reusable => {
+                                nblocks += 1;
+                                self.free_blocks[index].add_free(block)
+                            }
+                            SweepResult::Full => {
+                                nblocks += 1;
+                                self.unavail_blocks[index].add_free(block)
+                            }
+                        }
                     }
                 }
-                *class = new_list;
             }
-            self.large_space.sweep();
+
+            let nbytes = self.large_space.sweep();
+            (nblocks, nbytes)
         }
     }
     pub fn acquire_block(&self, size_class: usize) -> *mut Block {

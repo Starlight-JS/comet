@@ -34,16 +34,30 @@ impl AllocationConfig {
         percentage >= growth_threshold
     }
 
-    pub fn increment_large_threshold(&mut self, growth_factor: f64) {
+    pub fn increment_large_threshold(&mut self, v: bool, growth_factor: f64) {
+        let prev = self.large_threshold;
         self.large_threshold = (self.large_threshold as f64 * growth_factor).ceil() as usize;
+        logln_if!(
+            v,
+            "Inrease large threshold {}->{} bytes",
+            prev,
+            self.large_threshold
+        );
     }
 
     pub fn increment_large_allocations(&self, size: usize) {
         self.large_allocations.fetch_add(size, Ordering::AcqRel);
     }
 
-    pub fn increment_threshold(&mut self, growth_factor: f64) {
+    pub fn increment_threshold(&mut self, v: bool, growth_factor: f64) {
+        let prev = self.threshold;
         self.threshold = (f64::from(self.threshold) * growth_factor).ceil() as u32;
+        logln_if!(
+            v,
+            "Inrease block threshold {}->{} blocks",
+            prev,
+            self.threshold
+        );
     }
 
     pub fn update_after_collection(
@@ -60,13 +74,13 @@ impl AllocationConfig {
         self.block_allocations.store(0, Ordering::Relaxed);
         self.large_allocations.store(0, Ordering::Relaxed);
         let _ = if self.should_increase_threshold(blocks, max) {
-            self.increment_threshold(factor);
+            self.increment_threshold(config.verbose, factor);
             true
         } else {
             false
         };
         if self.should_increase_large_threshold(alive, lmax) {
-            self.increment_large_threshold(lfactor);
+            self.increment_large_threshold(config.verbose, lfactor);
         }
         false
     }

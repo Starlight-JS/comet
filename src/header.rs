@@ -42,6 +42,11 @@ impl HeapObjectHeader {
     pub fn set_free(&mut self) {
         self.encoded_low = 0;
     }
+
+    #[inline(always)]
+    pub fn from_object(obj: *const u8) -> *mut Self {
+        (obj as usize - size_of::<Self>()) as _
+    }
     #[inline(always)]
     pub fn payload(&self) -> *const u8 {
         (self as *const Self as usize + size_of::<Self>()) as _
@@ -79,6 +84,7 @@ impl HeapObjectHeader {
             return false;
         }
         self.encoded_high.set_state(new);
+        debug_assert_eq!(self.state(), new);
         true
     }
     #[inline(always)]
@@ -92,42 +98,25 @@ impl HeapObjectHeader {
     pub fn is_free(&self) -> bool {
         self.get_gc_info_index() == 0
     }
+
+    #[inline]
+    pub fn state(&self) -> CellState {
+        self.encoded_high.state()
+    }
 }
 
 #[bitfield(bits = 16)]
 #[derive(Clone, Copy)]
 pub struct EncodedHigh {
     size: B14,
+    #[bits = 2]
     state: CellState,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
-#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, BitfieldSpecifier)]
+#[bits = 2]
 pub enum CellState {
-    DefinitelyWhite = 0,
+    DefinitelyWhite,
     PossiblyGrey,
     PossiblyBlack,
-}
-
-impl Specifier for CellState {
-    type Bytes = u8;
-    const BITS: usize = 2;
-    type InOut = Self;
-    fn from_bytes(
-        bytes: Self::Bytes,
-    ) -> Result<Self::InOut, modular_bitfield::error::InvalidBitPattern<Self::Bytes>> {
-        Ok(match bytes {
-            0 => Self::DefinitelyWhite,
-            1 => Self::PossiblyGrey,
-            2 => Self::PossiblyBlack,
-            _ => unreachable!(),
-        })
-    }
-    fn into_bytes(input: Self::InOut) -> Result<Self::Bytes, modular_bitfield::error::OutOfBounds> {
-        match input {
-            Self::DefinitelyWhite => Ok(0),
-            Self::PossiblyGrey => Ok(1),
-            Self::PossiblyBlack => Ok(2),
-        }
-    }
 }

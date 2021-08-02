@@ -1,8 +1,12 @@
 use std::{cell::UnsafeCell, ptr::null_mut};
 
 use crate::{
-    global_allocator::GlobalAllocator, internal::collection_barrier::CollectionBarrier,
-    local_heap::LocalHeap, safepoint::GlobalSafepoint, Config,
+    global_allocator::GlobalAllocator,
+    internal::{collection_barrier::CollectionBarrier, stack_bounds::StackBounds},
+    local_heap::LocalHeap,
+    marking::SynchronousMarking,
+    safepoint::GlobalSafepoint,
+    Config,
 };
 
 pub struct Heap {
@@ -27,6 +31,7 @@ impl Heap {
 
         this.collection_barrier.heap = &mut *this;
         let mut local_heap = Box::new(LocalHeap::new(&mut this));
+        local_heap.bounds = StackBounds::current_thread_stack_bounds();
         this.safepoint.add_local_heap(&mut *local_heap, || {});
         this.main_thread_local_heap = &mut *local_heap;
         local_heap.is_main = true;
@@ -50,6 +55,7 @@ impl Heap {
             let raw = Box::into_raw(heap) as usize;
             let handle = std::thread::spawn(move || {
                 let mut heap = Box::from_raw(raw as *mut LocalHeap);
+                heap.bounds = StackBounds::current_thread_stack_bounds();
                 let result = callback(&mut heap);
                 (*heap.heap).safepoint.remove_local_heap(&mut *heap, || {});
                 result
@@ -73,14 +79,40 @@ impl Heap {
         &self.safepoint
     }
 
-    pub(crate) unsafe fn sweep(&self) {
+    pub(crate) unsafe fn sweep(&mut self) {
         // Sweep global allocator
-        (*self.global.get()).sweep();
-        // Sweep local allocators.
-        self.safepoint().iterate(|local| unsafe {
-            (*local).sweep();
-        });
+        let (nblocks, nbytes) = (*self.global.get()).sweep();
+
+        logln_if!(
+            self.config.verbose,
+            "{} blocks alive after GC\n{} bytes allocated in large object space",
+            nblocks,
+            nbytes
+        );
+        self.global
+            .get_mut()
+            .config
+            .update_after_collection(&self.config, nblocks, nbytes);
     }
 
-    pub(crate) fn collect_garbage(&mut self) {}
+    pub(crate) fn collect_garbage(&mut self) {
+        self.perform_garbage_collection();
+    }
+
+    pub(crate) fn perform_garbage_collection(&mut self) {
+        self.safepoint().enter_safepoint_scope(false);
+        unsafe {
+            self.safepoint().iterate(|local| {
+                (*local).retain_blocks();
+            });
+            (*self.global.get())
+                .large_space
+                .prepare_for_conservative_scan();
+            let mut marking = SynchronousMarking::new(self);
+
+            marking.run();
+            self.sweep();
+        }
+        self.safepoint().leave_safepoint_scope(false);
+    }
 }

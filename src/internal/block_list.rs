@@ -65,10 +65,12 @@ impl AtomicBlockList {
         let new_slot = free;
         let mut next = self.next.load();
         loop {
+            debug_assert_ne!(new_slot, next);
             (*new_slot).next = next;
             match self.next.compare_exchange(next, new_slot) {
                 Ok(_) => {
                     self.count.fetch_add(1, atomic::Ordering::AcqRel);
+                    return;
                 }
                 Err(actual_next) => {
                     next = actual_next;
@@ -84,6 +86,7 @@ impl AtomicBlockList {
                     x if x.is_null() => return null_mut(),
                     x => x,
                 };
+                debug_assert_ne!(next_free, (*next_free).next);
                 if self
                     .next
                     .compare_exchange(next_free, (*next_free).next)
