@@ -56,6 +56,7 @@ pub struct FreeEntry {
 #[repr(C, align(16))]
 pub struct Block {
     pub next: *mut Self,
+    /// Stores magic number to check if block is allocated.
     pub allocated: u32,
 
     pub cell_size: NonZeroU16,
@@ -165,7 +166,11 @@ impl Block {
         self.begin() + offset
     }
 
-    pub fn sweep(&mut self, bitmap: &SpaceBitmap<16>) -> SweepResult {
+    pub fn sweep<const MAJOR: bool>(
+        &mut self,
+        bitmap: &SpaceBitmap<16>,
+        live: &SpaceBitmap<16>,
+    ) -> SweepResult {
         let mut freelist = FreeList::new();
         let mut free = 0;
         let mut empty = true;
@@ -174,19 +179,14 @@ impl Block {
             let header = cell.cast::<HeapObjectHeader>();
 
             if (*header).is_free() {
-                debug_assert!(!bitmap.test(header.cast()));
                 free += 1;
                 freelist.add(header.cast());
             } else {
-                debug_assert!(bitmap.test(header.cast()));
-
-                if (*header).set_state(
-                    crate::header::CellState::PossiblyBlack,
-                    crate::header::CellState::DefinitelyWhite,
-                ) {
+                if bitmap.test(header as _) {
                     empty = false;
                 } else {
-                    bitmap.clear(header.cast());
+                    println!("free {:p}", header);
+                    live.clear(header as _);
                     let info = table.get_gc_info((*header).get_gc_info_index());
                     if let Some(callback) = info.finalize {
                         callback((*header).payload() as _);

@@ -4,8 +4,6 @@ use crate::gc_info_table::{GCInfo, GC_TABLE};
 
 use super::{finalize_trait::FinalizeTrait, trace_trait::TraceTrait};
 
-pub type GCInfoIndex = u16;
-
 pub trait GCInfoTrait<T: TraceTrait + FinalizeTrait<T> + Sized + 'static> {
     const REGISTERED_INDEX: AtomicU16;
     fn index() -> GCInfoIndex;
@@ -23,5 +21,22 @@ impl<T: TraceTrait + FinalizeTrait<T> + Sized + 'static> GCInfoTrait<T> for T {
                 },
             )
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct GCInfoIndex(pub(crate) u16);
+
+impl GCInfoIndex {
+    pub fn get(self) -> GCInfo {
+        unsafe { GC_TABLE.get_gc_info(self) }
+    }
+    /// Obtain mutable reference to GCInfo.
+    ///
+    /// # Safety
+    /// Unsafe since modifying GCInfo is unsafe and might break GC.
+    ///
+    pub unsafe fn get_mut(self) -> &'static mut GCInfo {
+        GC_TABLE.get_gc_info_mut(self)
     }
 }

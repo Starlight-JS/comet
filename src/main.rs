@@ -1,20 +1,18 @@
-use std::time::Duration;
-
-use slgc::{heap::Heap, internal::gc_info::*, Config, GCPlatform};
+use slgc::{global_allocator::LARGE_CUTOFF, heap::Heap, internal::gc_info::*, Config, GCPlatform};
 fn main() {
     GCPlatform::initialize();
+    println!("{}", LARGE_CUTOFF);
     let mut config = Config::default();
     config.dump_size_classes = true;
     config.verbose = true;
-    config.block_threshold = 1;
+    config.generational = true;
     let (_heap, mut local) = Heap::new(config);
+    _heap.add_core_constraints(&local);
     unsafe {
         let mem = local.allocate_raw_or_fail(u32::index(), 48);
-        let mem2 = local.allocate_raw_or_fail(u32::index(), 16 * 1024);
-        local.try_perform_collection();
+
         let mem3 = local.allocate_raw_or_fail(u16::index(), 129);
         local.try_perform_collection();
-
-        println!("{:p} {:p} {:p}", &mem, &mem2, &mem3);
+        local.try_perform_collection();
     }
 }

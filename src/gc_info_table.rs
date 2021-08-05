@@ -72,10 +72,10 @@ impl GCInfoTable {
             let index = &(*self.type_id_map.as_ptr())[table_idx as usize];
             let index_ = index.load(std::sync::atomic::Ordering::Acquire);
             if index_ != 0 {
-                return index_;
+                return GCInfoIndex(index_);
             }
             let index_ = self.add_gc_info(info);
-            index.store(index_, std::sync::atomic::Ordering::Release);
+            index.store(index_.0, std::sync::atomic::Ordering::Release);
             index_
         }
     }
@@ -90,10 +90,14 @@ impl GCInfoTable {
 
         self.table.add(index as _).write(info);
 
-        index
+        GCInfoIndex(index)
     }
 
     pub unsafe fn get_gc_info(&self, index: GCInfoIndex) -> GCInfo {
-        self.table.add(index as _).read()
+        self.table.add(index.0 as _).read()
+    }
+
+    pub unsafe fn get_gc_info_mut(&mut self, index: GCInfoIndex) -> &mut GCInfo {
+        &mut *self.table.add(index.0 as _)
     }
 }

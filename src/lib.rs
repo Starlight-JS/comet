@@ -2,7 +2,8 @@
 use std::mem::size_of;
 
 use gc_info_table::GCInfo;
-use internal::BLOCK_SIZE;
+use header::HeapObjectHeader;
+use large_space::PreciseAllocation;
 /// Just like C's offsetof.
 ///
 /// The magic number 0x4000 is insignificant. We use it to avoid using NULL, since
@@ -32,6 +33,14 @@ macro_rules! logln_if {
         }
     };
 }
+
+macro_rules! log_if {
+    ($cond: expr, $($t:tt)*) => {
+        if $cond {
+            print!($($t)*);
+        }
+    };
+}
 pub mod allocation_config;
 pub mod block;
 pub mod block_allocator;
@@ -47,6 +56,7 @@ pub mod local_heap;
 pub mod marking;
 pub mod mmap;
 pub mod safepoint;
+pub mod task_scheduler;
 pub mod visitor;
 pub struct GCPlatform;
 
@@ -76,15 +86,19 @@ pub struct Config {
     pub dump_size_classes: bool,
     pub size_class_progression: f64,
     pub heap_size: usize,
-    pub large_threshold: usize,
-    pub block_threshold: usize,
+    pub max_heap_size: usize,
+    pub max_eden_size: usize,
     pub verbose: bool,
+    pub generational: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            generational: false,
             verbose: false,
+            max_eden_size: 64 * 1024,
+            max_heap_size: 256 * 1024,
             heap_growth_factor: 1.5,
             heap_growth_threshold: 0.78,
             large_heap_growth_factor: 1.5,
@@ -92,8 +106,17 @@ impl Default for Config {
             dump_size_classes: false,
             size_class_progression: 1.4,
             heap_size: 1 * 1024 * 1024 * 1024,
-            large_threshold: 4 * 1024 * 1024, // 4MB
-            block_threshold: (4 * 1024 * 1024) / BLOCK_SIZE,
+        }
+    }
+}
+
+pub fn gc_size(ptr: *const HeapObjectHeader) -> usize {
+    unsafe {
+        let size = (*ptr).get_size();
+        if size == 0 {
+            (*PreciseAllocation::from_cell(ptr as _)).cell_size()
+        } else {
+            size
         }
     }
 }

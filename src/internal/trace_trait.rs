@@ -1,9 +1,7 @@
 use crate::visitor::Visitor;
 
 pub type TraceCallback = extern "C" fn(*mut Visitor, *const u8);
-impl TraceTrait for u32 {}
-impl TraceTrait for u16 {}
-impl TraceTrait for u8 {}
+
 pub trait TraceTrait: Sized {
     fn trace(&self, vis: &mut Visitor) {
         let _ = vis;

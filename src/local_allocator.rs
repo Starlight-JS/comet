@@ -2,7 +2,7 @@ use std::ptr::null_mut;
 
 use crate::{
     block::Block,
-    global_allocator::{index_to_size_class, size_class_to_index, GlobalAllocator},
+    global_allocator::{size_class_to_index, GlobalAllocator},
     heap::Heap,
     internal::block_list::BlockList,
     local_heap::LocalHeap,
@@ -19,16 +19,16 @@ pub struct LocalAllocator {
 }
 
 impl LocalAllocator {
-    pub fn allocate(&mut self) -> *mut u8 {
+    pub fn allocate(&mut self) -> (*mut u8, usize) {
         if self.current_block.is_null() {
-            return self.allocate_slow();
+            return (self.allocate_slow(), self.cell_size as _);
         }
         unsafe {
             let mem = (*self.current_block).allocate();
             if mem.is_null() {
-                return self.allocate_slow();
+                return (self.allocate_slow(), self.cell_size as _);
             }
-            mem
+            (mem, self.cell_size as _)
         }
     }
 

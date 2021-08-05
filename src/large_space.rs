@@ -1,4 +1,4 @@
-use std::ptr::null_mut;
+use std::{ptr::null_mut, sync::atomic::AtomicBool};
 
 use crate::{gc_info_table::GC_TABLE, header::HeapObjectHeader};
 use parking_lot::{lock_api::RawMutex, RawMutex as Mutex};
@@ -13,7 +13,7 @@ pub struct PreciseAllocation {
     //pub link: LinkedListLink,
     /// allocation request size
     pub cell_size: usize,
-
+    pub mark: bool,
     /// index in precise_allocations
     pub index_in_space: u32,
     /// Is alignment adjusted?
@@ -21,6 +21,7 @@ pub struct PreciseAllocation {
     pub adjusted_alignment: bool,
     /// Is this even valid allocation?
     pub has_valid_cell: bool,
+    pub is_newly_allocated: bool,
 }
 
 impl PreciseAllocation {
@@ -31,6 +32,9 @@ impl PreciseAllocation {
     /// Check if raw_ptr is precisely allocated.
     pub fn is_precise(raw_ptr: *mut ()) -> bool {
         (raw_ptr as usize & Self::HALF_ALIGNMENT) != 0
+    }
+    pub fn mark_atomic(&self) -> &AtomicBool {
+        as_atomic!(&self.mark;AtomicBool)
     }
     /// Create PreciseAllocation from pointer
     pub fn from_cell(ptr: *mut HeapObjectHeader) -> *mut Self {
@@ -78,24 +82,62 @@ impl PreciseAllocation {
     pub fn contains(&self, raw_ptr: *mut ()) -> bool {
         self.above_lower_bound(raw_ptr) && self.below_upper_bound(raw_ptr)
     }
+    pub fn flip(&mut self) {
+        // Propagate the last time's mark bit to m_isNewlyAllocated so that `isLive` will say "yes" until this GC cycle finishes.
+        // After that, m_isNewlyAllocated is cleared again. So only previously marked or actually newly created objects survive.
+        // We do not need to care about concurrency here since marking thread is stopped right now. This is equivalent to the logic
+        // of MarkedBlock::aboutToMarkSlow.
+        // We invoke this function only when this is full collection. This ensures that at the end of upcoming cycle, we will
+        // clear NewlyAllocated bits of all objects. So this works correctly.
+        //
+        //                                      N: NewlyAllocated, M: Marked
+        //                                                 after this         at the end        When cycle
+        //                                            N M  function    N M     of cycle    N M  is finished   N M
+        // The live object survives the last cycle    0 1      =>      1 0        =>       1 1       =>       0 1    => live
+        // The dead object in the last cycle          0 0      =>      0 0        =>       0 0       =>       0 0    => dead
+        // The live object newly created after this            =>      1 0        =>       1 1       =>       0 1    => live
+        // The dead object newly created after this            =>      1 0        =>       1 0       =>       0 0    => dead
+        // The live object newly created before this  1 0      =>      1 0        =>       1 1       =>       0 1    => live
+        // The dead object newly created before this  1 0      =>      1 0        =>       1 0       =>       0 0    => dead
+        //                                                                                                    ^
+        //                                                              This is ensured since this function is used only for full GC.
+        self.is_newly_allocated |= self.is_marked();
+        self.mark_atomic().store(false, atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_marked(&self) -> bool {
+        self.mark_atomic().load(atomic::Ordering::Relaxed)
+    }
+
+    pub fn test_and_set_marked(&self) -> bool {
+        if self.is_marked() {
+            return true;
+        }
+        match self.mark_atomic().compare_exchange(
+            false,
+            true,
+            atomic::Ordering::Relaxed,
+            atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => false,
+            _ => true,
+        }
+    }
+
+    pub fn clear_marked(&self) {
+        self.mark_atomic().store(false, atomic::Ordering::Relaxed);
+    }
 
     /// Finalize cell if this allocation is not marked.
     pub fn sweep(&mut self) -> bool {
         let cell = self.cell();
         unsafe {
-            if (*cell).set_state(
-                crate::header::CellState::PossiblyBlack,
-                crate::header::CellState::DefinitelyWhite,
-            ) {
-            } else {
-                self.has_valid_cell = false;
-
+            if self.has_valid_cell && !self.is_live() {
                 let info = GC_TABLE.get_gc_info((*cell).get_gc_info_index());
                 if let Some(cb) = info.finalize {
                     cb((*cell).payload() as _);
                 }
-
-                return false;
+                self.has_valid_cell = false;
             }
         }
         true
@@ -117,16 +159,24 @@ impl PreciseAllocation {
             space.cast::<Self>().write(Self {
                 //link: LinkedListLink::new(),
                 adjusted_alignment,
-
+                mark: false,
                 //is_newly_allocated: true,
                 has_valid_cell: true,
                 cell_size: size,
                 index_in_space,
+                is_newly_allocated: false,
             });
 
             space.cast()
         }
     }
+    pub fn is_newly_allocated(&self) -> bool {
+        self.is_newly_allocated
+    }
+    pub fn is_live(&self) -> bool {
+        self.is_marked() || self.is_newly_allocated
+    }
+
     /// return cell size
     pub fn cell_size(&self) -> usize {
         self.cell_size
@@ -137,6 +187,10 @@ impl PreciseAllocation {
         unsafe {
             libc::free(base as _);
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.is_marked() && !self.is_newly_allocated()
     }
 }
 /// Check if `mem` is aligned for precise allocation
@@ -150,6 +204,12 @@ pub fn is_aligned_for_precise_allocation(mem: *mut u8) -> bool {
 pub struct LargeObjectSpace {
     pub(crate) large_space_mutex: Mutex,
     pub(crate) allocations: Vec<*mut PreciseAllocation>,
+    pub(crate) precise_allocations_nursery_offset: usize,
+    pub(crate) precise_allocations_offest_for_this_collection: usize,
+    pub(crate) precise_allocations_offset_nursery_for_sweep: usize,
+    pub(crate) precise_allocations_for_this_collection_size: usize,
+    pub(crate) precise_allocations_for_this_collection_begin: *mut *mut PreciseAllocation,
+    pub(crate) precise_allocations_for_this_collection_end: *mut *mut PreciseAllocation,
 }
 
 impl LargeObjectSpace {
@@ -157,54 +217,116 @@ impl LargeObjectSpace {
         Self {
             allocations: Vec::new(),
             large_space_mutex: Mutex::INIT,
+            precise_allocations_nursery_offset: 0,
+            precise_allocations_offest_for_this_collection: 0,
+            precise_allocations_offset_nursery_for_sweep: 0,
+            precise_allocations_for_this_collection_end: null_mut(),
+            precise_allocations_for_this_collection_begin: null_mut(),
+            precise_allocations_for_this_collection_size: 0,
+        }
+    }
+    pub fn begin_marking(&mut self) {
+        for alloc in self.allocations.iter() {
+            unsafe {
+                (**alloc).flip();
+            }
         }
     }
     #[inline]
     pub fn contains(&self, pointer: *const u8) -> *mut HeapObjectHeader {
+        // check only for eden space pointers when conservatively scanning.
         unsafe {
-            if self.allocations.is_empty() {
-                return null_mut();
-            }
-            if (**self.allocations.first().unwrap()).above_lower_bound(pointer as _)
-                && (**self.allocations.last().unwrap()).below_upper_bound(pointer as _)
-            {
-                let prec = PreciseAllocation::from_cell(pointer as _);
-                match self.allocations.binary_search_by(|a| a.cmp(&prec)) {
-                    Ok(ix) => (*self.allocations[ix]).cell(),
-                    _ => null_mut(),
+            if self.precise_allocations_for_this_collection_size != 0 {
+                if (**self.precise_allocations_for_this_collection_begin)
+                    .above_lower_bound(pointer as _)
+                    && (**(self.precise_allocations_for_this_collection_end.sub(1)))
+                        .below_upper_bound(pointer as _)
+                {
+                    let prec = PreciseAllocation::from_cell(pointer as _);
+                    let slice = std::slice::from_raw_parts(
+                        self.precise_allocations_for_this_collection_begin,
+                        self.precise_allocations_for_this_collection_size,
+                    );
+                    let result = slice.binary_search_by(|ptr| ptr.cmp(&prec));
+                    if let Ok(_) = result {
+                        return (*prec).cell();
+                    }
                 }
-            } else {
-                null_mut()
             }
+            null_mut()
         }
     }
-    pub fn sweep(&mut self) -> usize {
-        let mut alive = 0;
-        self.allocations.retain(|allocation| unsafe {
-            let allocation = &mut **allocation;
-            if !allocation.sweep() {
-                allocation.destroy();
-                false
-            } else {
-                alive += allocation.cell_size();
-                true
-            }
-        });
-        alive
+
+    pub fn prepare_for_allocation(&mut self, eden: bool) {
+        if eden {
+            self.precise_allocations_offset_nursery_for_sweep =
+                self.precise_allocations_nursery_offset;
+        } else {
+            self.precise_allocations_offset_nursery_for_sweep = 0;
+        }
+        self.precise_allocations_nursery_offset = self.allocations.len();
+    }
+
+    pub fn prepare_for_marking(&mut self, eden: bool) {
+        if eden {
+            self.precise_allocations_offest_for_this_collection =
+                self.precise_allocations_nursery_offset;
+        } else {
+            self.precise_allocations_offest_for_this_collection = 0;
+        }
     }
     /// Sort allocations before consrvative scan.
     pub fn prepare_for_conservative_scan(&mut self) {
-        self.allocations.sort_by(|a, b| a.cmp(b));
-        for (index, alloc) in self.allocations.iter().enumerate() {
-            unsafe {
-                (**alloc).index_in_space = index as _;
+        unsafe {
+            self.precise_allocations_for_this_collection_begin = self
+                .allocations
+                .as_mut_ptr()
+                .add(self.precise_allocations_offest_for_this_collection);
+            self.precise_allocations_for_this_collection_size =
+                self.allocations.len() - self.precise_allocations_offest_for_this_collection;
+            self.precise_allocations_for_this_collection_end =
+                self.allocations.as_mut_ptr().add(self.allocations.len());
+            let slice = std::slice::from_raw_parts_mut(
+                self.precise_allocations_for_this_collection_begin,
+                self.precise_allocations_for_this_collection_size,
+            );
+
+            slice.sort_by(|a, b| a.cmp(b));
+
+            let mut index = self.precise_allocations_offest_for_this_collection;
+            let mut start = self.precise_allocations_for_this_collection_begin;
+            let end = self.precise_allocations_for_this_collection_end;
+            while start != end {
+                (**start).index_in_space = index as _;
+                index += 1;
+                start = start.add(1);
             }
         }
     }
-    /// Obtains reference to all precise allocations. Used by conservative scan.
-    pub(crate) fn allocations(&self) -> &[*mut PreciseAllocation] {
-        &self.allocations
+
+    pub fn sweep(&mut self) {
+        let mut src_index = self.precise_allocations_offset_nursery_for_sweep;
+        let mut dst_index = src_index;
+        while src_index < self.allocations.len() {
+            let allocation = self.allocations[src_index];
+            src_index += 1;
+            unsafe {
+                (*allocation).sweep();
+                if (*allocation).is_empty() {
+                    (*allocation).destroy();
+                    println!("Sweep {:p}", allocation);
+                    continue;
+                } else {
+                    (*allocation).index_in_space = dst_index as u32;
+                    self.allocations[dst_index] = allocation;
+                    dst_index += 1;
+                }
+            }
+        }
+        self.allocations.resize(dst_index, null_mut());
+        self.precise_allocations_nursery_offset = self.allocations.len();
     }
+
     pub fn allocate(&mut self, size: usize) -> *mut HeapObjectHeader {
         unsafe {
             self.large_space_mutex.lock();

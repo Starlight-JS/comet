@@ -1,15 +1,12 @@
 use std::{
     cell::Cell,
-    f32::MAX,
     ptr::{null_mut, NonNull},
 };
 
 use crate::{
-    gc_info_table::GCInfo,
     gcref::UntypedGcRef,
     global_allocator::{
         round_up, size_class_to_index, GlobalAllocator, LARGE_CUTOFF, NUM_SIZE_CLASSES,
-        PRECISE_CUTOFF,
     },
     header::HeapObjectHeader,
     heap::Heap,
@@ -85,14 +82,22 @@ impl LocalHeap {
         }
     }
     /// Allocates `size` bytes on the GC heap. If GC is required or no more memory left `None` is returned.
+    #[allow(unused_unsafe)]
     pub unsafe fn allocate_raw(
         &mut self,
         gc_info: GCInfoIndex,
         size: usize,
     ) -> Option<UntypedGcRef> {
+        self.safepoint();
         let size = round_up(size, 16);
         let mut is_large = false;
-        let mem = if size <= LARGE_CUTOFF {
+        let bytes = &(*self.heap).bytes_allocated_this_cycle;
+        if as_atomic!(bytes;AtomicUsize).load(atomic::Ordering::Relaxed)
+            >= (*self.heap).max_eden_size
+        {
+            self.try_perform_collection();
+        };
+        let (mem, size) = if size <= LARGE_CUTOFF {
             match self.allocators[size_class_to_index(size)] {
                 Some(ref mut allocator) => allocator.allocate(),
                 None => self.allocate_raw_small_slow(size),
@@ -101,12 +106,17 @@ impl LocalHeap {
             is_large = true;
             (*self.global_heap).large_allocation(size)
         };
+        let bytes = &(*self.heap).bytes_allocated_this_cycle;
+        as_atomic!(bytes;AtomicUsize).fetch_add(size, atomic::Ordering::Relaxed);
         if !mem.is_null() {
             let cell = mem.cast::<HeapObjectHeader>();
             (*cell).force_set_state(crate::header::CellState::DefinitelyWhite);
             (*cell).set_gc_info(gc_info);
             if !is_large {
                 (*self.space_bitmap).set(cell.cast());
+                (*cell).set_size(size);
+            } else {
+                (*cell).set_size(0);
             }
             Some(UntypedGcRef {
                 header: NonNull::new_unchecked(cell),
@@ -129,7 +139,7 @@ impl LocalHeap {
         mem.unwrap()
     }
 
-    fn allocate_raw_small_slow(&mut self, size: usize) -> *mut u8 {
+    fn allocate_raw_small_slow(&mut self, size: usize) -> (*mut u8, usize) {
         self.init_allocator(size_class_to_index(size));
         self.allocators[size_class_to_index(size)]
             .as_mut()
@@ -197,6 +207,7 @@ impl LocalHeap {
             }
         }
     }
+    /*
     pub(crate) fn sweep(&mut self) -> usize {
         let mut nblocks = 0;
         for alloc in self
@@ -234,7 +245,7 @@ impl LocalHeap {
             }
         }
         nblocks
-    }
+    }*/
     pub fn is_parked(&self) -> bool {
         let state = self.state.load(atomic::Ordering::Relaxed);
         state == ThreadState::Parked || state == ThreadState::ParkedSafepointRequested
@@ -361,8 +372,8 @@ impl LocalHeap {
 
     pub fn try_perform_collection(&self) -> bool {
         unsafe {
+            self.last_sp.set(approximate_stack_pointer());
             if self.is_main {
-                self.last_sp.set(approximate_stack_pointer());
                 (*self.heap).collect_garbage();
                 return true;
             } else {

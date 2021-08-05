@@ -14,7 +14,3 @@ pub trait FinalizeTrait<T> {
         }
     }
 }
-
-impl FinalizeTrait<u16> for u16 {}
-impl FinalizeTrait<u32> for u32 {}
-impl FinalizeTrait<u8> for u8 {}

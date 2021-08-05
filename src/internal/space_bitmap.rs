@@ -178,6 +178,21 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
     pub fn compute_heap_size(bitmap_bytes: u64) -> usize {
         (bitmap_bytes * 8 * ALIGN as u64) as _
     }
+
+    pub fn clear_range(&self, begin: *const u8, end: *const u8) {
+        let mut begin_offset = begin as usize - self.heap_begin as usize;
+        let mut end_offset = end as usize - self.heap_begin as usize;
+        while begin_offset < end_offset && Self::offset_bit_index(begin_offset) != 0 {
+            self.clear((self.heap_begin + begin_offset) as _);
+            begin_offset += ALIGN;
+        }
+
+        while begin_offset < end_offset && Self::offset_bit_index(end_offset) != 0 {
+            end_offset -= ALIGN;
+            self.clear((self.heap_begin + end_offset) as _);
+        }
+        // TODO: try to madvise unused pages.
+    }
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         name: &'static str,

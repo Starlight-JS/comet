@@ -1,6 +1,7 @@
 use crate::{
     gc_info_table::GC_TABLE,
     gcref::{GcRef, UntypedGcRef},
+    heap::Heap,
     internal::trace_trait::{TraceDescriptor, TraceTrait},
 };
 
@@ -11,6 +12,8 @@ pub trait VisitorTrait {
     }
 
     fn visit_conservative(&mut self, from: *const *const u8, to: *const *const u8);
+
+    fn heap(&self) -> *mut Heap;
 }
 
 #[repr(C)]
@@ -19,6 +22,9 @@ pub struct Visitor {
 }
 
 impl Visitor {
+    pub(crate) fn heap(&self) -> *mut Heap {
+        unsafe { (*self.vis).heap() }
+    }
     /// Trace method for raw pointers. Prefer the versions for managed pointers.
     pub unsafe fn trace<T: TraceTrait>(&mut self, t: *const T) {
         if t.is_null() {
@@ -40,7 +46,7 @@ impl Visitor {
         }
     }
 
-    pub fn trace_untyped<T: TraceTrait>(&mut self, object: UntypedGcRef) {
+    pub fn trace_untyped(&mut self, object: UntypedGcRef) {
         unsafe {
             let header = &*object.header.as_ptr();
             let gc_info = GC_TABLE.get_gc_info(header.get_gc_info_index());

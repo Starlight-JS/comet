@@ -1,4 +1,3 @@
-use crate::allocation_config::AllocationConfig;
 use crate::block::SweepResult;
 use crate::large_space::PreciseAllocation;
 use crate::Config;
@@ -9,7 +8,6 @@ use crate::{
     large_space::LargeObjectSpace,
 };
 use std::mem::size_of;
-use std::ptr::null_mut;
 
 /// Sizes up to this amount get a size class for each size step.
 pub const PRECISE_CUTOFF: usize = 80;
@@ -150,7 +148,7 @@ pub struct GlobalAllocator {
     pub(crate) block_allocator: BlockAllocator,
     pub(crate) large_space: LargeObjectSpace,
     pub(crate) live_bitmap: SpaceBitmap<16>,
-    pub(crate) config: AllocationConfig,
+    pub(crate) mark_bitmap: SpaceBitmap<16>,
     pub(crate) size_class_for_size_step: Box<[usize]>,
 }
 
@@ -172,27 +170,70 @@ impl GlobalAllocator {
                 block_allocator.mmap.start(),
                 config.heap_size,
             ),
+            mark_bitmap: SpaceBitmap::create(
+                "mark-bitmap",
+                block_allocator.mmap.start(),
+                config.heap_size,
+            ),
             block_allocator,
             large_space: LargeObjectSpace::new(),
-            config: AllocationConfig::new(config.block_threshold as _, config.large_threshold),
+
             size_class_for_size_step: table.into_boxed_slice(),
         }
     }
-    pub fn large_allocation(&mut self, size: usize) -> *mut u8 {
-        unsafe {
-            if self.config.allocation_threshold_exceeded() {
-                return null_mut();
-            }
-            let cell = self.large_space.allocate(size);
-            let prec = PreciseAllocation::from_cell(cell);
-            self.config.increment_large_allocations((*prec).cell_size());
+    pub fn large_allocation(&mut self, size: usize) -> (*mut u8, usize) {
+        let cell = self.large_space.allocate(size);
 
-            cell.cast()
+        (cell.cast(), unsafe {
+            (*PreciseAllocation::from_cell(cell)).cell_size()
+        })
+    }
+
+    fn for_each_block(&self, mut callback: impl FnMut(*mut Block)) {
+        for index in 0..NUM_SIZE_CLASSES {
+            let mut list = self.free_blocks[index].head();
+            let mut unavail = self.unavail_blocks[index].head();
+            unsafe {
+                loop {
+                    let block = list;
+                    if block.is_null() {
+                        break;
+                    }
+
+                    callback(block);
+                    list = (*block).next;
+                }
+
+                loop {
+                    let block = unavail;
+                    if block.is_null() {
+                        break;
+                    }
+
+                    callback(block);
+                    unavail = (*block).next;
+                }
+            }
         }
     }
-    pub(crate) fn sweep(&mut self) -> (usize, usize) {
+    pub fn prepare_for_marking(&mut self, eden: bool) {
+        self.large_space.prepare_for_marking(eden);
+    }
+    pub fn begin_marking(&mut self, full: bool) {
+        if full {
+            self.for_each_block(|block| unsafe {
+                self.mark_bitmap
+                    .clear_range((*block).begin() as _, (*block).end() as _)
+            });
+            for alloc in self.large_space.allocations.iter() {
+                unsafe {
+                    (**alloc).flip();
+                }
+            }
+        }
+    }
+    pub(crate) fn sweep<const MAJOR: bool>(&mut self) {
         unsafe {
-            let mut nblocks = 0;
             for index in 0..NUM_SIZE_CLASSES {
                 let list = std::mem::replace(&mut self.free_blocks[index], AtomicBlockList::new());
                 let unavail =
@@ -203,16 +244,10 @@ impl GlobalAllocator {
                         break;
                     }
 
-                    match (*block).sweep(&self.live_bitmap) {
+                    match (*block).sweep::<MAJOR>(&self.mark_bitmap, &self.live_bitmap) {
                         SweepResult::Empty => self.block_allocator.return_block(block),
-                        SweepResult::Full => {
-                            nblocks += 1;
-                            self.unavail_blocks[index].add_free(block)
-                        }
-                        SweepResult::Reusable => {
-                            nblocks += 1;
-                            self.free_blocks[index].add_free(block)
-                        }
+                        SweepResult::Full => self.unavail_blocks[index].add_free(block),
+                        SweepResult::Reusable => self.free_blocks[index].add_free(block),
                     }
                 }
                 {
@@ -222,34 +257,23 @@ impl GlobalAllocator {
                             break;
                         }
 
-                        match (*block).sweep(&self.live_bitmap) {
+                        match (*block).sweep::<MAJOR>(&self.mark_bitmap, &self.live_bitmap) {
                             SweepResult::Empty => self.block_allocator.return_block(block),
-                            SweepResult::Reusable => {
-                                nblocks += 1;
-                                self.free_blocks[index].add_free(block)
-                            }
-                            SweepResult::Full => {
-                                nblocks += 1;
-                                self.unavail_blocks[index].add_free(block)
-                            }
+                            SweepResult::Reusable => self.free_blocks[index].add_free(block),
+                            SweepResult::Full => self.unavail_blocks[index].add_free(block),
                         }
                     }
                 }
             }
 
-            let nbytes = self.large_space.sweep();
-            (nblocks, nbytes)
+            self.large_space.sweep();
         }
     }
     pub fn acquire_block(&self, size_class: usize) -> *mut Block {
         let freelist = &self.free_blocks[size_class];
-        if self.config.allocation_threshold_exceeded() {
-            return null_mut();
-        }
+
         let mut block = freelist.take_free();
         if block.is_null() {
-            // todo: should increment_allocations also work on recyclable blocks (from self.free_blocks)?
-            self.config.increment_allocations();
             block = self.block_allocator.get_block();
             unsafe {
                 (*block).init(self.size_class_for_size_step[size_class] as _);

@@ -1,8 +1,5 @@
-use std::{cell::Cell, sync::atomic::AtomicBool};
-
-use atomic::Atomic;
-use crossbeam_utils::atomic::AtomicCell;
 use parking_lot::{Condvar, Mutex};
+use std::{cell::Cell, sync::atomic::AtomicBool};
 
 use crate::{heap::Heap, local_heap::LocalHeap};
 

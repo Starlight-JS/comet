@@ -1,7 +1,4 @@
-use std::{
-    ptr::{null_mut, NonNull},
-    sync::atomic::AtomicUsize,
-};
+use std::{ptr::null_mut, sync::atomic::AtomicUsize};
 
 use crossbeam_utils::atomic::AtomicCell;
 
@@ -60,7 +57,9 @@ impl AtomicBlockList {
             next: AtomicCell::new(null_mut()),
         }
     }
-
+    pub fn head(&self) -> *mut Block {
+        self.next.load()
+    }
     pub unsafe fn add_free(&self, free: *mut Block) {
         let new_slot = free;
         let mut next = self.next.load();

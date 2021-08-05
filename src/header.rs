@@ -1,6 +1,6 @@
 use crate::internal::gc_info::GCInfoIndex;
 use modular_bitfield::prelude::*;
-use std::{mem::size_of, sync::atomic::AtomicU16};
+use std::mem::size_of;
 
 // HeapObjectHeader contains meta data per object and is prepended to each
 // object.
@@ -12,11 +12,11 @@ use std::{mem::size_of, sync::atomic::AtomicU16};
 // +-----------------+------+------------------------------------------+
 // | GCInfoIndex     |   14 |                                          |
 // | unused          |    1 |                                          |
-// | in construction |    1 | In construction encoded as |false|.      |
+// | unused          |    1 | In construction encoded as |false|.      |
 // +-----------------+------+------------------------------------------+
-// | size            |   14 | 17 bits because allocations are aligned. |
+// | size            |   13 | 17 bits because allocations are aligned. |
 // | unused          |    1 |                                          |
-// | mark bit        |    1 |                                          |
+// | cell state      |    2 |                                          |
 // +-----------------+------+------------------------------------------+
 //
 // Notes:
@@ -39,6 +39,9 @@ pub struct HeapObjectHeader {
 pub const ALLOCATION_GRANULARITY: usize = size_of::<usize>();
 
 impl HeapObjectHeader {
+    pub fn is_precise(&self) -> bool {
+        self.get_size() == 0
+    }
     pub fn set_free(&mut self) {
         self.encoded_low = 0;
     }
@@ -53,7 +56,7 @@ impl HeapObjectHeader {
     }
     #[inline(always)]
     pub fn get_gc_info_index(&self) -> GCInfoIndex {
-        self.encoded_low
+        GCInfoIndex(self.encoded_low)
     }
     /// Returns size of an object. If it is allocated in large object space `0` is returned.
     #[inline(always)]
@@ -91,12 +94,13 @@ impl HeapObjectHeader {
     pub fn force_set_state(&mut self, state: CellState) {
         self.encoded_high.set_state(state);
     }
+    #[inline(always)]
     pub fn set_gc_info(&mut self, index: GCInfoIndex) {
-        self.encoded_low = index;
+        self.encoded_low = index.0;
     }
     #[inline(always)]
     pub fn is_free(&self) -> bool {
-        self.get_gc_info_index() == 0
+        self.get_gc_info_index().0 == 0
     }
 
     #[inline]
@@ -108,7 +112,9 @@ impl HeapObjectHeader {
 #[bitfield(bits = 16)]
 #[derive(Clone, Copy)]
 pub struct EncodedHigh {
-    size: B14,
+    size: B13,
+    #[allow(dead_code)]
+    padding: B1,
     #[bits = 2]
     state: CellState,
 }

@@ -1,8 +1,7 @@
-use std::mem::swap;
-
 use crate::{
     block::Block,
     gc_info_table::GC_TABLE,
+    gc_size,
     global_allocator::GlobalAllocator,
     header::CellState,
     header::HeapObjectHeader,
@@ -14,6 +13,8 @@ use crate::{
 pub struct MarkingVisitor {
     worklist: Vec<TraceDescriptor>,
     heap: *mut GlobalAllocator,
+    h: *mut Heap,
+    bytes_visited: usize,
 }
 #[inline]
 unsafe fn trace_desc(ptr: *mut HeapObjectHeader) -> TraceDescriptor {
@@ -23,6 +24,9 @@ unsafe fn trace_desc(ptr: *mut HeapObjectHeader) -> TraceDescriptor {
     }
 }
 impl VisitorTrait for MarkingVisitor {
+    fn heap(&self) -> *mut Heap {
+        self.h
+    }
     fn visit(
         &mut self,
         this: *const u8,
@@ -30,8 +34,11 @@ impl VisitorTrait for MarkingVisitor {
     ) {
         unsafe {
             let header = HeapObjectHeader::from_object(this);
+            let res = (*self.h).test_and_set_marked(header);
 
-            if (*header).set_state(CellState::DefinitelyWhite, CellState::PossiblyGrey) {
+            if !res {
+                (*header).force_set_state(CellState::PossiblyGrey);
+                self.bytes_visited += gc_size(header);
                 self.worklist.push(descriptor);
             }
         }
@@ -51,7 +58,7 @@ impl VisitorTrait for MarkingVisitor {
                         let cell = (*block).cell_from_ptr(pointer);
                         if (*self.heap).live_bitmap.test(cell) {
                             let hdr = cell.cast::<HeapObjectHeader>();
-                            println!("Small object {:p} at {:p}", hdr, scan);
+
                             self.visit((*hdr).payload(), trace_desc(hdr));
                         }
                     }
@@ -59,7 +66,6 @@ impl VisitorTrait for MarkingVisitor {
                     let hdr = (*self.heap).large_space.contains(pointer);
 
                     if !hdr.is_null() {
-                        println!("Large object {:p} at {:p}", hdr, scan);
                         self.visit((*hdr).payload(), trace_desc(hdr));
                     }
                 }
@@ -77,32 +83,27 @@ impl<'a> SynchronousMarking<'a> {
     pub fn new(heap: &'a mut Heap) -> Self {
         Self { heap }
     }
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> usize {
         let mut vis = MarkingVisitor {
             worklist: vec![],
             heap: self.heap.global.get(),
+            bytes_visited: 0,
+            h: self.heap as *mut _,
         };
-
-        self.heap.safepoint().iterate(|local| unsafe {
-            let mut from = (*local).bounds.origin;
-            let mut to = (*local).last_sp.get();
-            if to.is_null() {
-                return;
-            }
-            if from > to {
-                swap(&mut to, &mut from);
-            }
-
-            vis.visit_conservative(from.cast(), to.cast());
-        });
-
+        let mut vis_ = Visitor { vis: &mut vis };
+        self.heap.current_visitor = Some(&mut vis_);
+        let mut guard = self.heap.constraints.lock();
+        for c in guard.iter_mut() {
+            c.execute(&mut Visitor { vis: &mut vis })
+        }
         while let Some(desc) = vis.worklist.pop() {
             unsafe {
                 let hdr = HeapObjectHeader::from_object(desc.base_object_payload);
-                println!("Blacken {:p}", hdr);
+
                 assert!((*hdr).set_state(CellState::PossiblyGrey, CellState::PossiblyBlack));
                 (desc.callback)(&mut Visitor { vis: &mut vis }, desc.base_object_payload);
             }
         }
+        vis.bytes_visited
     }
 }
