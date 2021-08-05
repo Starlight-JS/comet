@@ -114,6 +114,10 @@ impl WeakGcRef {
     pub fn upgrade(&self) -> Option<UntypedGcRef> {
         self.slot.value
     }
+
+    pub fn slot(self) -> GcRef<WeakSlot> {
+        self.slot
+    }
 }
 impl<T> Copy for GcRef<T> {}
 
