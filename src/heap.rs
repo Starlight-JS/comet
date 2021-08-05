@@ -10,7 +10,7 @@ use crate::{
     large_space::PreciseAllocation,
     local_heap::LocalHeap,
     marking::SynchronousMarking,
-    safepoint::GlobalSafepoint,
+    safepoint::{GlobalSafepoint, SafepointScope},
     task_scheduler::TaskScheduler,
     visitor::Visitor,
     Config,
@@ -40,7 +40,7 @@ pub struct Heap {
     collection_barrier: CollectionBarrier,
     config: Config,
     pub(crate) task_scheduler: TaskScheduler,
-    main_thread_local_heap: *mut LocalHeap,
+    pub(crate) main_thread_local_heap: *mut LocalHeap,
     pub(crate) constraints: Mutex<Vec<Box<dyn MarkingConstraint>>>,
     pub(crate) current_visitor: Option<*mut Visitor>,
     generational_gc: bool,
@@ -63,6 +63,28 @@ pub struct Heap {
 }
 
 impl Heap {
+    /// Walks all cells allocated in the heap.
+    pub fn for_each_cell(
+        &self,
+        safepoint: SafepointScope,
+        mut callback: impl FnMut(*mut HeapObjectHeader),
+    ) -> SafepointScope {
+        unsafe {
+            (*self.global.get()).for_each_block(|block| {
+                (*block).walk(|cell| {
+                    callback(cell.cast());
+                })
+            });
+            (*self.global.get())
+                .large_space
+                .allocations
+                .iter()
+                .for_each(|cell| {
+                    callback((**cell).cell());
+                });
+        }
+        safepoint
+    }
     pub fn task_scheduler(&self) -> &TaskScheduler {
         &self.task_scheduler
     }

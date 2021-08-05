@@ -6,7 +6,10 @@ use std::{
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::local_heap::{LocalHeap, ThreadState};
+use crate::{
+    heap::Heap,
+    local_heap::{LocalHeap, ThreadState},
+};
 use parking_lot::Mutex as GMutex;
 /// Used to bring all threads with heap access to a safepoint such that e.g. a
 /// garbage collection can be performed.
@@ -282,3 +285,28 @@ impl GlobalSafepoint {
 
 unsafe impl Send for GlobalSafepoint {}
 unsafe impl Sync for GlobalSafepoint {}
+
+/// Safepoint scope.
+pub struct SafepointScope(*mut LocalHeap);
+
+impl SafepointScope {
+    pub fn new(local: &mut LocalHeap) -> Self {
+        unsafe {
+            (*local.heap).safepoint().enter_safepoint_scope(
+                local as *const LocalHeap == (*local.heap).main_thread_local_heap,
+            );
+        }
+        Self(local as *const _ as *mut _)
+    }
+}
+
+impl Drop for SafepointScope {
+    fn drop(&mut self) {
+        unsafe {
+            let local = &mut *self.0;
+            (*local.heap).safepoint().leave_safepoint_scope(
+                local as *const LocalHeap == (*local.heap).main_thread_local_heap,
+            );
+        }
+    }
+}

@@ -1,7 +1,7 @@
-use slgc::{global_allocator::LARGE_CUTOFF, heap::Heap, internal::gc_info::*, Config, GCPlatform};
+use comet::{global_allocator::LARGE_CUTOFF, heap::Heap, internal::gc_info::*, Config, GCPlatform};
 fn main() {
     GCPlatform::initialize();
-    println!("{}", LARGE_CUTOFF);
+
     let mut config = Config::default();
     config.dump_size_classes = true;
     config.verbose = true;

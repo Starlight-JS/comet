@@ -189,7 +189,7 @@ impl GlobalAllocator {
         })
     }
 
-    fn for_each_block(&self, mut callback: impl FnMut(*mut Block)) {
+    pub fn for_each_block(&self, mut callback: impl FnMut(*mut Block)) {
         for index in 0..NUM_SIZE_CLASSES {
             let mut list = self.free_blocks[index].head();
             let mut unavail = self.unavail_blocks[index].head();
@@ -232,6 +232,7 @@ impl GlobalAllocator {
             }
         }
     }
+
     pub(crate) fn sweep<const MAJOR: bool>(&mut self) {
         unsafe {
             for index in 0..NUM_SIZE_CLASSES {
