@@ -3,6 +3,7 @@ use std::{cell::UnsafeCell, ptr::null_mut, sync::atomic::AtomicUsize};
 use parking_lot::Mutex;
 
 use crate::{
+    gcref::{GcRef, WeakGcRef, WeakSlot},
     global_allocator::GlobalAllocator,
     header::HeapObjectHeader,
     internal::{collection_barrier::CollectionBarrier, stack_bounds::StackBounds},
@@ -58,6 +59,7 @@ pub struct Heap {
     should_do_full_collection: bool,
     collection_scope: Option<CollectionScope>,
     last_collection_scope: Option<CollectionScope>,
+    pub(crate) weak_references: Mutex<Vec<GcRef<WeakSlot>>>,
 }
 
 impl Heap {
@@ -108,7 +110,7 @@ impl Heap {
             gc_prepare_stw_callback: None,
             current_visitor: None,
             collection_barrier: CollectionBarrier::new(null_mut()),
-
+            weak_references: Mutex::new(vec![]),
             task_scheduler: TaskScheduler::new(),
             main_thread_local_heap: null_mut(),
             should_do_full_collection: false,
@@ -208,6 +210,33 @@ impl Heap {
             }
         }
     }
+
+    fn update_weak_references(&self) {
+        let mut weak_refs = self.weak_references.lock();
+        unsafe {
+            for weak in weak_refs.iter_mut() {
+                match weak.value {
+                    Some(value)
+                        if (*(self.global.get()))
+                            .mark_bitmap
+                            .test(value.header.as_ptr() as _) =>
+                    {
+                        continue;
+                    }
+                    _ => {
+                        weak.value = None;
+                    }
+                }
+            }
+        }
+    }
+
+    fn reset_weak_references(&self) {
+        let bitmap = &unsafe { &*self.global.get() }.mark_bitmap;
+        self.weak_references
+            .lock()
+            .retain(|ref_| bitmap.test(ref_.into_raw() as _));
+    }
     fn will_start_collection(&mut self) {
         log_if!(self.config.verbose, " => ");
         if self.should_do_full_collection || !self.generational_gc {
@@ -299,7 +328,8 @@ impl Heap {
                 let mut marking = SynchronousMarking::new(self);
                 marking.run()
             };
-
+            self.update_weak_references();
+            self.reset_weak_references();
             self.sweep();
             self.update_object_counts(live);
 

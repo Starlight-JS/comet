@@ -11,8 +11,8 @@ fn main() {
     unsafe {
         let mem = local.allocate_raw_or_fail(u32::index(), 48);
 
-        let mem3 = local.allocate_raw_or_fail(u16::index(), 129);
+        let mem3 = local.allocate_weak_ref(mem);
         local.try_perform_collection();
-        local.try_perform_collection();
+        println!("{:?}", mem3.upgrade());
     }
 }

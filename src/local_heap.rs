@@ -1,16 +1,21 @@
 use std::{
     cell::Cell,
+    mem::size_of,
     ptr::{null_mut, NonNull},
 };
 
 use crate::{
-    gcref::UntypedGcRef,
+    gcref::{UntypedGcRef, WeakGcRef, WeakSlot},
     global_allocator::{
         round_up, size_class_to_index, GlobalAllocator, LARGE_CUTOFF, NUM_SIZE_CLASSES,
     },
     header::HeapObjectHeader,
     heap::Heap,
-    internal::{gc_info::GCInfoIndex, space_bitmap::SpaceBitmap, stack_bounds::StackBounds},
+    internal::{
+        gc_info::{GCInfoIndex, GCInfoTrait},
+        space_bitmap::SpaceBitmap,
+        stack_bounds::StackBounds,
+    },
     local_allocator::LocalAllocator,
 };
 use atomic::Atomic;
@@ -78,6 +83,29 @@ impl LocalHeap {
                 allocators: vec![None; NUM_SIZE_CLASSES].into_boxed_slice(),
                 is_main: false,
                 state: Atomic::new(ThreadState::Running),
+            }
+        }
+    }
+
+    pub fn allocate_weak_ref(&mut self, value: UntypedGcRef) -> WeakGcRef {
+        unsafe {
+            let memory = self.allocate_raw_or_fail(
+                WeakSlot::index(),
+                size_of::<WeakSlot>() + size_of::<HeapObjectHeader>(),
+            );
+
+            memory
+                .get()
+                .cast::<WeakSlot>()
+                .write(WeakSlot { value: Some(value) });
+            self.park();
+            (*self.heap)
+                .weak_references
+                .lock()
+                .push(memory.cast_unchecked());
+            self.unpark();
+            WeakGcRef {
+                slot: memory.cast_unchecked(),
             }
         }
     }

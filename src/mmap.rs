@@ -156,4 +156,4 @@ pub mod _unix {
 #[cfg(unix)]
 pub use _unix::*;
 #[cfg(windows)]
-pub use _win;
+pub use _win::*;

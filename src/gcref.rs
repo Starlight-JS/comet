@@ -18,6 +18,9 @@ pub struct GcRef<T> {
 }
 
 impl<T> GcRef<T> {
+    pub fn into_raw(self) -> *const HeapObjectHeader {
+        self.raw.header.as_ptr()
+    }
     pub fn downcast(self) -> UntypedGcRef {
         self.raw
     }

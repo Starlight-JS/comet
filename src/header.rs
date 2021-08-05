@@ -66,7 +66,8 @@ impl HeapObjectHeader {
     }
     #[inline(always)]
     pub fn set_size(&mut self, size: usize) {
-        self.encoded_high.set_size(size as _);
+        self.encoded_high
+            .set_size((size / ALLOCATION_GRANULARITY) as _);
     }
     #[inline(always)]
     pub fn is_grey(self) -> bool {
