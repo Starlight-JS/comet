@@ -6,10 +6,12 @@ use crate::{
     gcref::{GcRef, WeakGcRef, WeakSlot},
     global_allocator::GlobalAllocator,
     header::HeapObjectHeader,
-    internal::{collection_barrier::CollectionBarrier, stack_bounds::StackBounds},
+    internal::{
+        collection_barrier::CollectionBarrier, stack_bounds::StackBounds, trace_trait::TraceTrait,
+    },
     large_space::PreciseAllocation,
     local_heap::LocalHeap,
-    marking::SynchronousMarking,
+    marking::{MarkingVisitor, SynchronousMarking},
     safepoint::{GlobalSafepoint, SafepointScope},
     task_scheduler::TaskScheduler,
     visitor::Visitor,
@@ -68,8 +70,13 @@ impl Heap {
         &self,
         safepoint: SafepointScope,
         mut callback: impl FnMut(*mut HeapObjectHeader),
+        mut weak_refs: impl FnMut(GcRef<WeakSlot>),
     ) -> SafepointScope {
         unsafe {
+            let lock = self.weak_references.lock();
+            for weak in lock.iter() {
+                weak_refs(*weak);
+            }
             (*self.global.get()).for_each_block(|block| {
                 (*block).walk(|cell| {
                     callback(cell.cast());
