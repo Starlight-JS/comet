@@ -187,7 +187,7 @@ impl Heap {
                 let mut heap = Box::from_raw(raw as *mut LocalHeap);
                 heap.bounds = StackBounds::current_thread_stack_bounds();
                 let result = callback(&mut heap);
-                (*heap.heap).safepoint.remove_local_heap(&mut *heap, || {});
+                drop(heap);
                 result
             });
 
@@ -388,5 +388,15 @@ impl DeferPoint {
 impl Drop for DeferPoint {
     fn drop(&mut self) {
         self.defers.fetch_sub(1, atomic::Ordering::SeqCst);
+    }
+}
+
+impl Drop for Heap {
+    fn drop(&mut self) {
+        self.safepoint().iterate(|local| unsafe {
+            (*local).retain_blocks();
+        });
+
+        self.global.get_mut().release_memory();
     }
 }

@@ -1,4 +1,6 @@
 use crate::block::SweepResult;
+use crate::gc_info_table::GC_TABLE;
+use crate::header::HeapObjectHeader;
 use crate::large_space::PreciseAllocation;
 use crate::Config;
 use crate::{
@@ -228,6 +230,52 @@ impl GlobalAllocator {
             for alloc in self.large_space.allocations.iter() {
                 unsafe {
                     (**alloc).flip();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn release_memory(&mut self) {
+        unsafe {
+            for index in 0..NUM_SIZE_CLASSES {
+                let list = std::mem::replace(&mut self.free_blocks[index], AtomicBlockList::new());
+                let unavail =
+                    std::mem::replace(&mut self.unavail_blocks[index], AtomicBlockList::new());
+                loop {
+                    let block = list.take_free();
+                    if block.is_null() {
+                        break;
+                    }
+
+                    (*block).walk(|cell| {
+                        let hdr = cell.cast::<HeapObjectHeader>();
+                        if !(*hdr).is_free() {
+                            if let Some(callback) =
+                                GC_TABLE.get_gc_info((*hdr).get_gc_info_index()).finalize
+                            {
+                                callback((*hdr).payload() as _);
+                            }
+                        }
+                    })
+                }
+                {
+                    loop {
+                        let block = unavail.take_free();
+                        if block.is_null() {
+                            break;
+                        }
+
+                        (*block).walk(|cell| {
+                            let hdr = cell.cast::<HeapObjectHeader>();
+                            if !(*hdr).is_free() {
+                                if let Some(callback) =
+                                    GC_TABLE.get_gc_info((*hdr).get_gc_info_index()).finalize
+                                {
+                                    callback((*hdr).payload() as _);
+                                }
+                            }
+                        })
+                    }
                 }
             }
         }

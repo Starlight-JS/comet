@@ -314,7 +314,7 @@ impl LargeObjectSpace {
                 (*allocation).sweep();
                 if (*allocation).is_empty() {
                     (*allocation).destroy();
-                    println!("Sweep {:p}", allocation);
+
                     continue;
                 } else {
                     (*allocation).index_in_space = dst_index as u32;
@@ -341,6 +341,20 @@ impl LargeObjectSpace {
             let cell = (*memory).cell();
             (*cell).set_size(0); // size of 0 means object is large.
             (*memory).cell()
+        }
+    }
+}
+
+impl Drop for LargeObjectSpace {
+    fn drop(&mut self) {
+        while let Some(alloc) = self.allocations.pop() {
+            unsafe {
+                let hdr = (*alloc).cell();
+                if let Some(callback) = GC_TABLE.get_gc_info((*hdr).get_gc_info_index()).finalize {
+                    callback((*hdr).payload() as _);
+                }
+                (*alloc).destroy();
+            }
         }
     }
 }

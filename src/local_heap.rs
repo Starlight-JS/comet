@@ -459,3 +459,14 @@ pub fn approximate_stack_pointer() -> *mut u8 {
     result = &mut result as *mut *mut u8 as *mut u8;
     result
 }
+
+impl Drop for LocalHeap {
+    fn drop(&mut self) {
+        self.retain_blocks();
+        unsafe {
+            (*self.heap)
+                .safepoint()
+                .remove_local_heap(self as *mut Self, || {});
+        }
+    }
+}

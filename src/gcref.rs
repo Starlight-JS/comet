@@ -106,6 +106,7 @@ impl FinalizeTrait<WeakSlot> for WeakSlot {}
 impl TraceTrait for WeakSlot {}
 
 #[repr(transparent)]
+#[derive(Clone, Copy)]
 pub struct WeakGcRef {
     pub(crate) slot: GcRef<WeakSlot>,
 }
