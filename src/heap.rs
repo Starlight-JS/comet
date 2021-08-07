@@ -134,7 +134,6 @@ impl Heap {
             config,
         });
 
-        this.collection_barrier.heap = &mut *this;
         this.global.normal_allocator.line_bitmap = &this.global.line_bitmap;
         this.global.overflow_allocator.line_bitmap = &this.global.line_bitmap;
         this
@@ -299,7 +298,7 @@ impl Heap {
             self.config.verbose,
             " => {}\n => threshold: {}kb",
             current_heap_size,
-            self.max_heap_size / 1024
+            self.max_heap_size as f64 / 1024.
         );
     }
     pub(crate) fn test_and_set_marked(&self, hdr: *const HeapObjectHeader) -> bool {

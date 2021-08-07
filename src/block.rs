@@ -110,9 +110,7 @@ impl Block {
             self as *const Self as usize as *const u8,
             self.end(),
             |object| unsafe {
-                println!("visit {:p}", object);
                 if !bitmap.test(object as _) {
-                    println!("sweep {:p}", object);
                     if let Some(callback) =
                         GC_TABLE.get_gc_info((*object).get_gc_info_index()).finalize
                     {
