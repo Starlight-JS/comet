@@ -5,6 +5,8 @@ use core::fmt;
 use memmap2::MmapMut;
 use std::mem::size_of;
 
+use crate::header::HeapObjectHeader;
+
 pub const fn round_down(x: u64, n: u64) -> u64 {
     x & !n
 }
@@ -192,6 +194,101 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
             self.clear((self.heap_begin + end_offset) as _);
         }
         // TODO: try to madvise unused pages.
+    }
+
+    /// Visit marked bits in bitmap.
+    ///
+    /// NOTE: You can safely change bits in this bitmap during visiting it since it loads word and then visits marked bits in it.
+    pub fn visit_marked_range(
+        &self,
+        visit_begin: *const u8,
+        visit_end: *const u8,
+        mut visitor: impl FnMut(*mut HeapObjectHeader),
+    ) {
+        /*let mut scan = visit_begin;
+        let end = visit_end;
+        unsafe {
+            while scan < end {
+                if self.test(scan) {
+                    visitor(scan as _);
+                }
+                scan = scan.add(ALIGN);
+            }
+
+        }*/
+        let offset_start = visit_begin as usize - self.heap_begin as usize;
+        let offset_end = visit_end as usize - self.heap_begin as usize;
+
+        let index_start = Self::offset_to_index(offset_start);
+        let index_end = Self::offset_to_index(offset_end);
+        let bit_start = (offset_start / ALIGN) % BITS_PER_INTPTR;
+        let bit_end = (offset_end / ALIGN) % BITS_PER_INTPTR;
+        // Index(begin)  ...    Index(end)
+        // [xxxxx???][........][????yyyy]
+        //      ^                   ^
+        //      |                   #---- Bit of visit_end
+        //      #---- Bit of visit_begin
+        //
+
+        unsafe {
+            let mut left_edge = self.bitmap_begin.cast::<usize>().add(index_start).read();
+            left_edge &= !((1 << bit_start) - 1);
+            let mut right_edge;
+            if index_start < index_end {
+                // Left edge != right edge.
+
+                // Traverse left edge.
+                if left_edge != 0 {
+                    let ptr_base =
+                        Self::index_to_offset(index_start as _) as usize + self.heap_begin;
+                    while {
+                        let shift = left_edge.trailing_zeros();
+                        let obj = (ptr_base + shift as usize * ALIGN) as *mut HeapObjectHeader;
+                        visitor(obj);
+                        left_edge ^= 1 << shift as usize;
+                        left_edge != 0
+                    } {}
+                }
+                // Traverse the middle, full part.
+                for i in index_start + 1..index_end {
+                    let mut w = (*self.bitmap_begin.add(i)).load(Ordering::Relaxed);
+                    if w != 0 {
+                        let ptr_base = Self::index_to_offset(i as _) as usize + self.heap_begin;
+                        while {
+                            let shift = w.trailing_zeros();
+                            let obj = (ptr_base + shift as usize * ALIGN) as *mut HeapObjectHeader;
+                            visitor(obj);
+                            w ^= 1 << shift as usize;
+                            w != 0
+                        } {}
+                    }
+                }
+
+                // Right edge is unique.
+                // But maybe we don't have anything to do: visit_end starts in a new word...
+                if bit_end == 0 {
+                    right_edge = 0;
+                } else {
+                    right_edge = self.bitmap_begin.cast::<usize>().add(index_end).read();
+                }
+            } else {
+                right_edge = left_edge;
+            }
+
+            // right edge handling
+
+            right_edge &= (1 << bit_end) - 1;
+            if right_edge != 0 {
+                let ptr_base = Self::index_to_offset(index_end as _) as usize + self.heap_begin;
+                while {
+                    let shift = right_edge.trailing_zeros();
+                    let obj = (ptr_base + shift as usize * ALIGN) as *mut HeapObjectHeader;
+                    visitor(obj);
+                    right_edge ^= 1 << shift as usize;
+                    right_edge != 0
+                } {}
+            }
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(

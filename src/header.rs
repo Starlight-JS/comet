@@ -115,7 +115,7 @@ impl HeapObjectHeader {
 pub struct EncodedHigh {
     size: B13,
     #[allow(dead_code)]
-    padding: B1,
+    pinned: B1,
     #[bits = 2]
     state: CellState,
 }

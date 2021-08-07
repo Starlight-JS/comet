@@ -1,8 +1,39 @@
-use std::{ptr::null_mut, sync::atomic::AtomicUsize};
-
-use crossbeam_utils::atomic::AtomicCell;
-
 use crate::block::Block;
+use crossbeam_utils::atomic::AtomicCell;
+use std::{ptr::null_mut, sync::atomic::AtomicUsize};
+#[derive(Clone)]
+pub struct AllBlockList {
+    head: *mut Block,
+}
+
+impl AllBlockList {
+    pub fn new() -> Self {
+        Self { head: null_mut() }
+    }
+
+    pub fn push(&mut self, block: *mut Block) {
+        unsafe {
+            (*block).all_next = self.head;
+            self.head = block;
+        }
+    }
+
+    pub fn pop(&mut self) -> *mut Block {
+        unsafe {
+            if self.head.is_null() {
+                return null_mut();
+            }
+            let head = self.head;
+            self.head = (*head).all_next;
+            head
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.head.is_null()
+    }
+}
+
 #[derive(Clone)]
 pub struct BlockList {
     head: *mut Block,
@@ -12,7 +43,15 @@ impl BlockList {
     pub fn new() -> Self {
         Self { head: null_mut() }
     }
-
+    pub fn for_each(&self, mut visitor: impl FnMut(*mut Block)) {
+        unsafe {
+            let mut head = self.head;
+            while !head.is_null() {
+                visitor(head);
+                head = (*head).next;
+            }
+        }
+    }
     pub fn push(&mut self, block: *mut Block) {
         unsafe {
             (*block).next = self.head;
@@ -37,7 +76,6 @@ impl BlockList {
 }
 
 /// Lock-free block list
-
 pub struct AtomicBlockList {
     next: AtomicCell<*mut Block>,
     count: AtomicUsize,

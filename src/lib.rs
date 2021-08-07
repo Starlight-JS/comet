@@ -42,20 +42,19 @@ macro_rules! log_if {
     };
 }
 pub mod allocation_config;
+pub mod allocator;
 pub mod block;
 pub mod block_allocator;
 pub mod gc_info_table;
 pub mod gcref;
 pub mod global_allocator;
+pub mod globals;
 pub mod header;
 pub mod heap;
 pub mod internal;
 pub mod large_space;
-pub mod local_allocator;
-pub mod local_heap;
 pub mod marking;
 pub mod mmap;
-pub mod safepoint;
 pub mod task_scheduler;
 pub mod visitor;
 pub struct GCPlatform;

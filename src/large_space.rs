@@ -1,7 +1,6 @@
 use std::{ptr::null_mut, sync::atomic::AtomicBool};
 
 use crate::{gc_info_table::GC_TABLE, header::HeapObjectHeader};
-use parking_lot::{lock_api::RawMutex, RawMutex as Mutex};
 
 /// Precise allocation used for large objects (>= LARGE_CUTOFF).
 /// Starlight uses mimalloc that already knows what to do for large allocations. The GC shouldn't
@@ -202,7 +201,6 @@ pub fn is_aligned_for_precise_allocation(mem: *mut u8) -> bool {
 /// Each object gets its own malloc'd region of memory.
 /// Large objects are never moved by the garbage collector.
 pub struct LargeObjectSpace {
-    pub(crate) large_space_mutex: Mutex,
     pub(crate) allocations: Vec<*mut PreciseAllocation>,
     pub(crate) precise_allocations_nursery_offset: usize,
     pub(crate) precise_allocations_offest_for_this_collection: usize,
@@ -216,7 +214,7 @@ impl LargeObjectSpace {
     pub(crate) fn new() -> Self {
         Self {
             allocations: Vec::new(),
-            large_space_mutex: Mutex::INIT,
+
             precise_allocations_nursery_offset: 0,
             precise_allocations_offest_for_this_collection: 0,
             precise_allocations_offset_nursery_for_sweep: 0,
@@ -225,10 +223,12 @@ impl LargeObjectSpace {
             precise_allocations_for_this_collection_size: 0,
         }
     }
-    pub fn begin_marking(&mut self) {
-        for alloc in self.allocations.iter() {
-            unsafe {
-                (**alloc).flip();
+    pub fn begin_marking(&mut self, full: bool) {
+        if full {
+            for alloc in self.allocations.iter() {
+                unsafe {
+                    (**alloc).flip();
+                }
             }
         }
     }
@@ -329,7 +329,6 @@ impl LargeObjectSpace {
 
     pub fn allocate(&mut self, size: usize) -> *mut HeapObjectHeader {
         unsafe {
-            self.large_space_mutex.lock();
             let index = self.allocations.len();
             let memory = PreciseAllocation::try_create(size, index as _);
             if memory.is_null() {
@@ -337,7 +336,7 @@ impl LargeObjectSpace {
             }
 
             self.allocations.push(memory);
-            self.large_space_mutex.unlock();
+
             let cell = (*memory).cell();
             (*cell).set_size(0); // size of 0 means object is large.
             (*memory).cell()

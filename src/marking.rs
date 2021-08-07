@@ -1,5 +1,4 @@
 use crate::{
-    block::Block,
     gc_info_table::GC_TABLE,
     gc_size,
     global_allocator::GlobalAllocator,
@@ -53,14 +52,11 @@ impl VisitorTrait for MarkingVisitor {
                 let pointer = scan.read();
 
                 if (*self.heap).block_allocator.is_in_space(pointer) {
-                    let block = Block::get_block_ptr(pointer);
-                    if (*block).is_in_block(pointer) {
-                        let cell = (*block).cell_from_ptr(pointer);
-                        if (*self.heap).live_bitmap.test(cell) {
-                            let hdr = cell.cast::<HeapObjectHeader>();
+                    let cell = pointer;
+                    if (*self.heap).live_bitmap.test(cell) {
+                        let hdr = cell.cast::<HeapObjectHeader>();
 
-                            self.visit((*hdr).payload(), trace_desc(hdr));
-                        }
+                        self.visit((*hdr).payload(), trace_desc(hdr as _));
                     }
                 } else {
                     let hdr = (*self.heap).large_space.contains(pointer);
@@ -86,16 +82,16 @@ impl<'a> SynchronousMarking<'a> {
     pub fn run(&mut self) -> usize {
         let mut vis = MarkingVisitor {
             worklist: vec![],
-            heap: self.heap.global.get(),
+            heap: &mut self.heap.global,
             bytes_visited: 0,
             h: self.heap as *mut _,
         };
-        let mut vis_ = Visitor { vis: &mut vis };
-        self.heap.current_visitor = Some(&mut vis_);
-        let mut guard = self.heap.constraints.lock();
-        for c in guard.iter_mut() {
+
+        let mut constraints = std::mem::replace(&mut self.heap.constraints, vec![]);
+        for c in constraints.iter_mut() {
             c.execute(&mut Visitor { vis: &mut vis })
         }
+        self.heap.constraints = constraints;
         while let Some(desc) = vis.worklist.pop() {
             unsafe {
                 let hdr = HeapObjectHeader::from_object(desc.base_object_payload);

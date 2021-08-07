@@ -19,6 +19,16 @@ impl BlockAllocator {
     pub fn total_blocks(&self) -> usize {
         (self.mmap.end() as usize - self.mmap.aligned() as usize) / BLOCK_SIZE
     }
+    pub fn start(&self) -> *mut u8 {
+        self.mmap.aligned()
+    }
+
+    pub fn end(&self) -> *mut u8 {
+        self.mmap.end()
+    }
+    pub fn size(&self) -> usize {
+        self.end() as usize - self.start() as usize
+    }
     pub fn new(size: usize) -> BlockAllocator {
         let map = Mmap::new(size);
 
