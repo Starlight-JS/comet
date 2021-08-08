@@ -21,8 +21,8 @@ pub const fn round_up(x: usize, y: usize) -> usize {
 pub struct GlobalAllocator {
     pub(crate) block_allocator: Box<BlockAllocator>,
     pub(crate) large_space: LargeObjectSpace,
-    pub(crate) live_bitmap: SpaceBitmap<16>,
-    pub(crate) mark_bitmap: SpaceBitmap<16>,
+    pub(crate) live_bitmap: SpaceBitmap<8>,
+    pub(crate) mark_bitmap: SpaceBitmap<8>,
     pub(crate) line_bitmap: SpaceBitmap<LINE_SIZE>,
     pub(crate) normal_allocator: NormalAllocator,
     pub(crate) overflow_allocator: OverflowAllocator,
@@ -35,17 +35,17 @@ impl GlobalAllocator {
         let mut global = Self {
             live_bitmap: SpaceBitmap::create(
                 "live-bitmap",
-                block_allocator.start(),
+                block_allocator.mmap.aligned(),
                 block_allocator.size(),
             ),
             mark_bitmap: SpaceBitmap::create(
                 "mark-bitmap",
-                block_allocator.start(),
+                block_allocator.mmap.aligned(),
                 block_allocator.size(),
             ),
             line_bitmap: SpaceBitmap::create(
                 "line-bitmap",
-                block_allocator.start(),
+                block_allocator.mmap.aligned(),
                 block_allocator.size(),
             ),
             block_allocator,
@@ -74,9 +74,8 @@ impl GlobalAllocator {
         self.overflow_allocator.get_all_blocks(&mut blocks);
         blocks.for_each(|block| unsafe {
             self.mark_bitmap
-                .clear_range((*block).begin() as _, (*block).end() as _);
-            self.line_bitmap
-                .clear_range((*block).begin(), (*block).end());
+                .clear_range(block as _, (*block).end() as _);
+            self.line_bitmap.clear_range(block as _, (*block).end());
         });
         for alloc in self.large_space.allocations.iter() {
             unsafe {
@@ -94,7 +93,11 @@ impl GlobalAllocator {
             while !block_list.is_empty() {
                 let block = block_list.pop();
 
-                match (*block).sweep::<true>(&self.mark_bitmap, &self.live_bitmap) {
+                match (*block).sweep::<true>(
+                    &self.mark_bitmap,
+                    &self.live_bitmap,
+                    &self.line_bitmap,
+                ) {
                     SweepResult::Empty => {
                         self.block_allocator.return_block(block);
                     }

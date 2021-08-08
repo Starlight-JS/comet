@@ -51,9 +51,9 @@ impl Visitor {
             let header = &*object.header.as_ptr();
             let gc_info = GC_TABLE.get_gc_info(header.get_gc_info_index());
             (*self.vis).visit(
-                object.get(),
+                header.payload(),
                 TraceDescriptor {
-                    base_object_payload: object.get(),
+                    base_object_payload: header.payload(),
                     callback: gc_info.trace,
                 },
             )

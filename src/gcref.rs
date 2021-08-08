@@ -183,7 +183,7 @@ impl<T> FinalizeTrait<Option<T>> for Option<T> {}
 impl<T: TraceTrait> TraceTrait for Option<T> {
     fn trace(&self, vis: &mut crate::visitor::Visitor) {
         match self {
-            Some(elem) => elem.trace(vis),
+            Some(elem) => vis.trace_ref(elem),
             _ => (),
         }
     }

@@ -33,7 +33,15 @@ macro_rules! logln_if {
         }
     };
 }
+/// rounds the given value `val` up to the nearest multiple
+/// of `align`
+pub fn align(value: u32, align: u32) -> u32 {
+    if align == 0 {
+        return value;
+    }
 
+    ((value + align - 1) / align) * align
+}
 macro_rules! log_if {
     ($cond: expr, $($t:tt)*) => {
         if $cond {

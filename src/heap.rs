@@ -178,18 +178,36 @@ impl Heap {
     }
 
     pub unsafe fn allocate_raw(&mut self, size: usize, index: GCInfoIndex) -> Option<UntypedGcRef> {
-        let size = round_up(size, 16);
+        let size = round_up(size, 8);
         let cell = if size >= LARGE_CUTOFF {
             return self.allocate_large(size, index);
-        } else if size <= MEDIUM_CUTOFF {
+        } else if size < MEDIUM_CUTOFF {
             self.global.normal_allocator.allocate(size)
         } else {
             self.global.overflow_allocator.allocate(size)
         };
         cell.map(|x| {
             (*x).set_size(size);
+
             self.bytes_allocated_this_cycle += size;
             (*x).set_gc_info(index);
+            debug_assert!(
+                {
+                    let mut scan = x as usize;
+                    let end = scan + size;
+                    let mut f = true;
+                    while scan < end {
+                        if self.global.live_bitmap.test(scan as _) {
+                            f = false;
+                            break;
+                        }
+                        scan += 8;
+                    }
+                    f
+                },
+                "object at {:p} was already allocated!",
+                x
+            );
             self.global.live_bitmap.set(x as _);
             UntypedGcRef {
                 header: NonNull::new_unchecked(x),
@@ -303,19 +321,15 @@ impl Heap {
     }
     pub(crate) fn test_and_set_marked(&self, hdr: *const HeapObjectHeader) -> bool {
         unsafe {
-            if !(*hdr).is_precise() {
-                let block = Block::get_block_ptr(hdr as _);
-                {
-                    self.global
-                        .line_bitmap
-                        .set((*block).line(Block::object_to_line_num(hdr as _)));
-                }
+            if self.global.block_allocator.is_in_space(hdr as _) {
                 self.global.mark_bitmap.set(hdr as _)
             } else {
+                debug_assert!(!self.global.large_space.contains(hdr as _).is_null());
                 (*PreciseAllocation::from_cell(hdr as _)).test_and_set_marked()
             }
         }
     }
+    #[inline(never)]
     pub(crate) fn perform_garbage_collection(&mut self) {
         unsafe {
             self.will_start_collection();

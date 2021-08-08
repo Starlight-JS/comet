@@ -18,6 +18,8 @@ impl<T: TraceTrait + FinalizeTrait<T> + Sized + 'static> GCInfoTrait<T> for T {
                 GCInfo {
                     finalize: <T as FinalizeTrait<T>>::CALLBACK,
                     trace: <T as TraceTrait>::trace_,
+                    vtable: 0,
+                    name: std::any::type_name::<T>(),
                 },
             )
         }

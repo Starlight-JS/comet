@@ -29,6 +29,7 @@ use std::mem::size_of;
 // - |mark bit| and |in construction| bits are located in separate 16-bit halves
 //    to allow potentially accessing them non-atomically.
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct HeapObjectHeader {
     #[cfg(target_pointer_width = "64")]
     _padding: u32,
@@ -56,6 +57,12 @@ impl HeapObjectHeader {
     }
     #[inline(always)]
     pub fn get_gc_info_index(&self) -> GCInfoIndex {
+        debug_assert!(
+            self.encoded_low > 0,
+            "Trying to access non-allocated header {:p} (idx {})",
+            self,
+            self.encoded_low
+        );
         GCInfoIndex(self.encoded_low)
     }
     /// Returns size of an object. If it is allocated in large object space `0` is returned.

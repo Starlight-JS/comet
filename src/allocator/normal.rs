@@ -74,7 +74,8 @@ impl Allocator for NormalAllocator {
                 return None;
             }
             (*block).set_allocated();
-            Some((block, LINE_SIZE as u16, (IMMIX_BLOCK_SIZE - 1) as u16))
+
+            Some((block, LINE_SIZE as u16, IMMIX_BLOCK_SIZE as u16 - 1))
         }
     }
     fn line_bitmap(&self) -> &SpaceBitmap<LINE_SIZE> {
@@ -87,8 +88,7 @@ impl Allocator for NormalAllocator {
             match self.recyclable_blocks.pop() {
                 x if x.is_null() => None,
                 block => {
-                    match unsafe { (*block).scan_block(&*self.line_bitmap, (LINE_SIZE - 1) as u16) }
-                    {
+                    match unsafe { (*block).scan_block(&*self.line_bitmap, LINE_SIZE as u16 - 1) } {
                         None => {
                             self.handle_full_block(block);
                             self.handle_no_hole(size)

@@ -18,6 +18,8 @@ use crate::mmap::Mmap;
 pub struct GCInfo {
     pub finalize: Option<FinalizationCallback>,
     pub trace: TraceCallback,
+    pub vtable: usize,
+    pub name: &'static str,
 }
 
 pub struct GCInfoTable {

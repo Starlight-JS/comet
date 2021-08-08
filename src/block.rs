@@ -1,4 +1,4 @@
-use std::ptr::null_mut;
+use std::{mem::size_of, ptr::null_mut};
 
 use crate::{
     gc_info_table::GC_TABLE,
@@ -17,7 +17,6 @@ pub struct Block {
     pub allocated: u32,
     pub hole_count: u8,
     pub heap: *mut Heap,
-    pub data_start: [u16; 0],
 }
 
 impl Block {
@@ -25,7 +24,14 @@ impl Block {
         self.allocated = 0xdeadbeef;
     }
     pub fn offset(&self, offset: usize) -> *mut u8 {
-        (self as *const Self as usize + offset) as _
+        let x = (self as *const Self as usize + offset);
+        debug_assert!(
+            x >= self.begin() as usize && x <= self.end() as usize,
+            "overflow {:x} (end={:p})",
+            x,
+            self.end()
+        );
+        x as _
     }
     /// Convert an address on this block into a line number.
     pub fn object_to_line_num(object: *const u8) -> usize {
@@ -50,13 +56,13 @@ impl Block {
                 allocated: 0,
                 heap: null_mut(),
                 hole_count: LINE_COUNT as _,
-                data_start: [],
             });
 
             &mut *ptr
         }
     }
     pub fn begin(&self) -> *mut u8 {
+        debug_assert!(size_of::<Self>() < LINE_SIZE);
         (self as *const Self as usize + LINE_SIZE) as _
     }
 
@@ -65,13 +71,13 @@ impl Block {
     }
     #[inline]
     pub fn is_in_block(&self, p: *const u8) -> bool {
-        if self.allocated == 0xdeadbeef {
-            let b = self.begin() as usize;
-            let e = self.end() as usize;
-            b < p as usize && p as usize <= e
-        } else {
-            false
-        }
+        //if self.allocated == 0xdeadbeef {
+        let b = self.begin() as usize;
+        let e = self.end() as usize;
+        b <= p as usize && p as usize <= e
+        //} else {
+        //    false
+        //}
     }
     /// Update the line counter for the given object.
     ///
@@ -86,7 +92,10 @@ impl Block {
         // that does not matter as we always skip a line in scan_block()
         let line_num = Self::object_to_line_num(object);
         let size = gc_size(object.cast());
+        debug_assert!(self.is_in_block(object));
+
         for line in line_num..(line_num + (size / LINE_SIZE) + 1) {
+            debug_assert!(line != 0);
             if MARK {
                 bitmap.set(self.line(line));
             } else {
@@ -95,34 +104,41 @@ impl Block {
         }
     }
     pub fn line(&self, index: usize) -> *mut u8 {
-        unsafe { self.begin().add(index * LINE_SIZE) }
+        let line = self.offset(index * LINE_SIZE);
+        debug_assert!(
+            line >= self.begin() && line <= self.end(),
+            "invalid line: {:p} (begin={:p},end={:p})",
+            line,
+            self.begin(),
+            self.end()
+        );
+        line
     }
 
     pub fn sweep<const MAJOR: bool>(
         &mut self,
-        bitmap: &SpaceBitmap<16>,
-        live: &SpaceBitmap<16>,
+        bitmap: &SpaceBitmap<8>,
+        live: &SpaceBitmap<8>,
+        line: &SpaceBitmap<LINE_SIZE>,
     ) -> SweepResult {
         let mut empty = true;
         let mut count = 0;
 
-        live.visit_marked_range(
-            self as *const Self as usize as *const u8,
-            self.end(),
-            |object| unsafe {
-                if !bitmap.test(object as _) {
-                    if let Some(callback) =
-                        GC_TABLE.get_gc_info((*object).get_gc_info_index()).finalize
-                    {
-                        callback((*object).payload() as _);
-                    }
-                    live.clear(object as _);
-                    count += 1;
-                } else {
-                    empty = false;
+        live.visit_marked_range(self.begin(), self.end(), |object| unsafe {
+            if !bitmap.test(object as _) {
+                if let Some(callback) = GC_TABLE.get_gc_info((*object).get_gc_info_index()).finalize
+                {
+                    callback((*object).payload() as _);
                 }
-            },
-        );
+                live.clear(object as _);
+
+                count += 1;
+            } else {
+                self.update_lines::<true>(line, object as _);
+                bitmap.clear(object as _);
+                empty = false;
+            }
+        });
         if empty {
             SweepResult::Empty
         } else {

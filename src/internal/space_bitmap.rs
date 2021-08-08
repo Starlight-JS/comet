@@ -133,7 +133,14 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
     #[inline]
     pub fn modify<const SET_BIT: bool>(&self, obj: *const u8) -> bool {
         let addr = obj as usize;
-        debug_assert!(addr >= self.heap_begin);
+        debug_assert!(
+            addr >= self.heap_begin,
+            "invalid address: {:x} ({:x} > {:x} is false)",
+            addr,
+            addr,
+            self.heap_begin
+        );
+        //debug_assert!(obj as usize % ALIGN == 0, "Unaligned address {:p}", obj);
         debug_assert!(self.has_address(obj), "Invalid object address: {:p}", obj);
         let offset = addr.wrapping_sub(self.heap_begin);
         let index = Self::offset_to_index(offset);
@@ -214,7 +221,6 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
                 }
                 scan = scan.add(ALIGN);
             }
-
         }*/
         let offset_start = visit_begin as usize - self.heap_begin as usize;
         let offset_end = visit_end as usize - self.heap_begin as usize;

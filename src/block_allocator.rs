@@ -1,9 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::{
-    block::Block,
-    internal::{block_list::AtomicBlockList, BLOCK_SIZE},
-    mmap::Mmap,
+    block::Block, globals::IMMIX_BLOCK_SIZE, internal::block_list::AtomicBlockList, mmap::Mmap,
 };
 
 pub struct BlockAllocator {
@@ -17,7 +15,7 @@ pub struct BlockAllocator {
 
 impl BlockAllocator {
     pub fn total_blocks(&self) -> usize {
-        (self.mmap.end() as usize - self.mmap.aligned() as usize) / BLOCK_SIZE
+        (self.mmap.end() as usize - self.mmap.aligned() as usize) / IMMIX_BLOCK_SIZE
     }
     pub fn start(&self) -> *mut u8 {
         self.mmap.aligned()
@@ -39,8 +37,8 @@ impl BlockAllocator {
 
             mmap: map,
         };
-        debug_assert!(this.data as usize % BLOCK_SIZE == 0);
-        this.mmap.commit(this.mmap.start(), BLOCK_SIZE);
+        debug_assert!(this.data as usize % IMMIX_BLOCK_SIZE == 0);
+        this.mmap.commit(this.mmap.start(), IMMIX_BLOCK_SIZE);
         this
     }
 
@@ -49,7 +47,7 @@ impl BlockAllocator {
         match self.free_blocks.take_free() {
             x if x.is_null() => self.build_block().expect("Out of memory"),
             x => {
-                self.mmap.commit(x as _, BLOCK_SIZE);
+                self.mmap.commit(x as _, IMMIX_BLOCK_SIZE);
                 Block::new(x as _);
                 x
             }
@@ -66,7 +64,7 @@ impl BlockAllocator {
             let mut old = data.load(Ordering::Relaxed);
             let mut new;
             loop {
-                new = old + BLOCK_SIZE;
+                new = old + IMMIX_BLOCK_SIZE;
                 if new > self.data_bound as usize {
                     return None;
                 }
@@ -76,8 +74,11 @@ impl BlockAllocator {
                     Err(x) => old = x,
                 }
             }
-            debug_assert!(old % BLOCK_SIZE == 0, "block is not aligned for block_size");
-            self.mmap.commit(old as *mut u8, BLOCK_SIZE);
+            debug_assert!(
+                old % IMMIX_BLOCK_SIZE == 0,
+                "block is not aligned for block_size"
+            );
+            self.mmap.commit(old as *mut u8, IMMIX_BLOCK_SIZE);
             Some(old as *mut Block)
         }
     }
@@ -86,7 +87,7 @@ impl BlockAllocator {
     pub fn return_blocks(&mut self, blocks: impl Iterator<Item = *mut Block>) {
         blocks.for_each(|block| unsafe {
             (*block).allocated = 0;
-            self.mmap.dontneed(block as *mut u8, BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
+            self.mmap.dontneed(block as *mut u8, IMMIX_BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
             self.free_blocks.add_free(block);
         });
     }
@@ -94,7 +95,7 @@ impl BlockAllocator {
         unsafe {
             (*block).allocated = 0;
         }
-        self.mmap.dontneed(block as *mut u8, BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
+        self.mmap.dontneed(block as *mut u8, IMMIX_BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
         unsafe {
             self.free_blocks.add_free(block);
         }
@@ -102,7 +103,7 @@ impl BlockAllocator {
 
     /// Return the number of unallocated blocks.
     pub fn available_blocks(&self) -> usize {
-        let nblocks = ((self.data_bound as usize) - (self.data as usize)) / BLOCK_SIZE;
+        let nblocks = ((self.data_bound as usize) - (self.data as usize)) / IMMIX_BLOCK_SIZE;
 
         nblocks + self.free_blocks.count()
     }

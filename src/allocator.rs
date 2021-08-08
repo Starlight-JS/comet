@@ -1,5 +1,6 @@
 use crate::{
     block::Block,
+    global_allocator::round_up,
     globals::LINE_SIZE,
     header::HeapObjectHeader,
     internal::{block_list::BlockList, space_bitmap::SpaceBitmap},
@@ -64,7 +65,7 @@ pub trait Allocator {
     #[inline]
     fn scan_for_hole(&mut self, size: usize, block_tuple: BlockTuple) -> Option<BlockTuple> {
         let (block, low, high) = block_tuple;
-        match (high - low) as usize >= size {
+        match (high - low as u16) as usize >= size {
             true => Some(block_tuple),
             false => match unsafe { (*block).scan_block(self.line_bitmap(), high) } {
                 None => {
@@ -89,8 +90,9 @@ pub trait Allocator {
         block_tuple: BlockTuple,
     ) -> (BlockTuple, *mut HeapObjectHeader) {
         let (block, low, high) = block_tuple;
+
         let object = unsafe { (*block).offset(low as usize) };
 
-        ((block, low + size as u16, high), object.cast())
+        ((block, low as u16 + size as u16, high), object.cast())
     }
 }

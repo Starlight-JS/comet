@@ -1,4 +1,4 @@
-use crate::internal::BLOCK_SIZE;
+use crate::globals::IMMIX_BLOCK_SIZE;
 #[cfg(windows)]
 pub mod _win {
     use super::*;
@@ -39,8 +39,8 @@ pub mod _win {
         }
         /// Return a `BLOCK_SIZE` aligned pointer to the mmap'ed region.
         pub fn aligned(&self) -> *mut u8 {
-            let offset = BLOCK_SIZE - (self.start as usize) % BLOCK_SIZE;
-            unsafe { self.start.add(offset).add(BLOCK_SIZE) as *mut u8 }
+            let offset = IMMIX_BLOCK_SIZE - (self.start as usize) % IMMIX_BLOCK_SIZE;
+            unsafe { self.start.add(offset) as *mut u8 }
         }
 
         pub fn start(&self) -> *mut u8 {
@@ -62,6 +62,9 @@ pub mod _win {
                 VirtualAlloc(page.cast(), size, MEM_COMMIT, PAGE_READWRITE);
             }
         }
+        pub const fn size(&self) -> usize {
+            self.size
+        }
     }
 
     impl Drop for Mmap {
@@ -78,6 +81,8 @@ pub mod _unix {
 
     use std::ptr::null_mut;
 
+    use crate::globals::IMMIX_BLOCK_SIZE;
+
     use super::*;
     pub struct Mmap {
         start: *mut u8,
@@ -86,6 +91,9 @@ pub mod _unix {
     }
 
     impl Mmap {
+        pub const fn size(&self) -> usize {
+            self.size
+        }
         pub const fn uninit() -> Self {
             Self {
                 start: null_mut(),
@@ -116,8 +124,8 @@ pub mod _unix {
         }
         /// Return a `BLOCK_SIZE` aligned pointer to the mmap'ed region.
         pub fn aligned(&self) -> *mut u8 {
-            let offset = BLOCK_SIZE - (self.start as usize) % BLOCK_SIZE;
-            unsafe { self.start.add(offset).add(BLOCK_SIZE) as *mut u8 }
+            let offset = IMMIX_BLOCK_SIZE - (self.start as usize) % IMMIX_BLOCK_SIZE;
+            unsafe { self.start.add(offset) as *mut u8 }
         }
 
         pub fn start(&self) -> *mut u8 {

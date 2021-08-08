@@ -76,7 +76,7 @@ impl Allocator for OverflowAllocator {
                 return None;
             }
             (*block).set_allocated();
-            Some((block, LINE_SIZE as _, (IMMIX_BLOCK_SIZE - 1) as _))
+            Some((block, LINE_SIZE as _, IMMIX_BLOCK_SIZE as u16 - 1))
         }
     }
 

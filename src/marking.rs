@@ -5,7 +5,7 @@ use crate::{
     header::CellState,
     header::HeapObjectHeader,
     heap::Heap,
-    internal::trace_trait::TraceDescriptor,
+    internal::{gc_info::GCInfoIndex, trace_trait::TraceDescriptor},
     visitor::{Visitor, VisitorTrait},
 };
 
@@ -53,10 +53,15 @@ impl VisitorTrait for MarkingVisitor {
 
                 if (*self.heap).block_allocator.is_in_space(pointer) {
                     let cell = pointer;
-                    if (*self.heap).live_bitmap.test(cell) {
-                        let hdr = cell.cast::<HeapObjectHeader>();
+                    if cell as usize % 8 == 0 && (*self.heap).live_bitmap.has_address(cell) {
+                        if (*self.heap).live_bitmap.test(cell)
+                            && (*cell.cast::<HeapObjectHeader>()).get_gc_info_index()
+                                != GCInfoIndex(0)
+                        {
+                            let hdr = cell.cast::<HeapObjectHeader>();
 
-                        self.visit((*hdr).payload(), trace_desc(hdr as _));
+                            self.visit((*hdr).payload(), trace_desc(hdr as _));
+                        }
                     }
                 } else {
                     let hdr = (*self.heap).large_space.contains(pointer);
