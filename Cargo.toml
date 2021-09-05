@@ -28,3 +28,7 @@ winapi = { version = "0.3", features = [
     "minwindef",
     "wincrypt",
 ] }
+
+[lib]
+name = "comet"
+crate-type = ["rlib", "dylib"]
