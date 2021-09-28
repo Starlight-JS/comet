@@ -1,4 +1,3 @@
-#![feature(const_type_id)]
 use std::mem::size_of;
 
 use gc_info_table::GCInfo;
