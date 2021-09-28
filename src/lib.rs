@@ -85,6 +85,7 @@ impl GCPlatform {
     }
 }
 
+#[repr(C)]
 pub struct Config {
     pub heap_growth_factor: f64,
     pub heap_growth_threshold: f64,
@@ -125,5 +126,159 @@ pub fn gc_size(ptr: *const HeapObjectHeader) -> usize {
         } else {
             size
         }
+    }
+}
+
+pub mod c_api {
+
+    use std::ptr::{null_mut, NonNull};
+
+    use crate::{
+        gc_info_table::{GCInfo, GC_TABLE},
+        gcref::{UntypedGcRef, WeakGcRef},
+        header::HeapObjectHeader,
+        heap::Heap,
+        internal::gc_info::GCInfoIndex,
+        visitor::Visitor,
+        Config, GCPlatform,
+    };
+
+    #[no_mangle]
+    pub extern "C" fn comet_gc_size(ptr: *const HeapObjectHeader) -> usize {
+        super::gc_size(ptr)
+    }
+    #[no_mangle]
+    pub extern "C" fn comet_default_config() -> Config {
+        Config::default()
+    }
+    #[no_mangle]
+    pub extern "C" fn comet_init() {
+        GCPlatform::initialize();
+    }
+    #[no_mangle]
+    pub extern "C" fn comet_heap_create(config: Config) -> *mut Heap {
+        Box::into_raw(Heap::new(config))
+    }
+    /// Free comet heap
+    #[no_mangle]
+    pub extern "C" fn comet_heap_free(heap: *mut Heap) {
+        unsafe {
+            Box::from_raw(heap);
+        }
+    }
+
+    /// Add GC constraint to the Comet Heap. Each constraint is executed when marking starts
+    /// to obtain list of root objects.
+    #[no_mangle]
+    pub extern "C" fn comet_heap_add_constraint(
+        heap: *mut Heap,
+        data: *mut u8,
+        callback: extern "C" fn(*mut u8, *mut Visitor),
+    ) {
+        unsafe {
+            (*heap).add_constraint(move |vis: &mut Visitor| {
+                let data = data;
+                callback(data, vis as *mut _);
+            });
+        }
+    }
+
+    /// Add core constraints to the heap. This one will setup stack scanning routines.
+    #[no_mangle]
+    pub extern "C" fn comet_heap_add_core_constraints(heap: *mut Heap) {
+        unsafe {
+            (*heap).add_core_constraints();
+        }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn comet_heap_collect(heap: *mut Heap) {
+        unsafe {
+            (*heap).collect_garbage();
+        }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn comet_heap_collect_if_necessary_or_defer(heap: *mut Heap) {
+        unsafe {
+            (*heap).collect_if_necessary_or_defer();
+        }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn comet_heap_allocate_weak(
+        heap: *mut Heap,
+        object: *mut HeapObjectHeader,
+    ) -> WeakGcRef {
+        unsafe {
+            (*heap).allocate_weak(UntypedGcRef {
+                header: NonNull::new_unchecked(object),
+            })
+        }
+    }
+
+    /// Allocates memory and returns pointer. NULL is returned if no memory is available.
+    #[no_mangle]
+    pub extern "C" fn comet_heap_allocate(
+        heap: *mut Heap,
+        size: usize,
+        index: GCInfoIndex,
+    ) -> *mut HeapObjectHeader {
+        unsafe {
+            match (*heap).allocate_raw(size, index) {
+                Some(mem) => mem.header.as_ptr(),
+                None => null_mut(),
+            }
+        }
+    }
+
+    /// Allocates memory and returns pointer. When no memory is left process is aborted.
+    #[no_mangle]
+    pub extern "C" fn comet_heap_allocate_or_fail(
+        heap: *mut Heap,
+        size: usize,
+        index: GCInfoIndex,
+    ) -> *mut HeapObjectHeader {
+        unsafe { (*heap).allocate_raw_or_fail(size, index).header.as_ptr() }
+    }
+
+    /// Upgrade weak ref. If it is still alive then pointer is returned otherwise NULL is returned.
+    #[no_mangle]
+    pub extern "C" fn comet_weak_upgrade(weak: WeakGcRef) -> *mut HeapObjectHeader {
+        match weak.upgrade() {
+            Some(ptr) => ptr.header.as_ptr(),
+            None => null_mut(),
+        }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn comet_trace(vis: *mut Visitor, ptr: *mut HeapObjectHeader) {
+        if ptr.is_null() {
+            return;
+        }
+        unsafe {
+            (*vis).trace_untyped(UntypedGcRef {
+                header: NonNull::new_unchecked(ptr),
+            })
+        }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn comet_trace_conservatively(
+        vis: *mut Visitor,
+        from: *const u8,
+        to: *const u8,
+    ) {
+        unsafe { (*vis).trace_conservatively(from, to) }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn comet_add_gc_info(info: GCInfo) -> GCInfoIndex {
+        unsafe { GC_TABLE.add_gc_info(info) }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn comet_get_gc_info(index: GCInfoIndex) -> *mut GCInfo {
+        unsafe { GC_TABLE.get_gc_info_mut(index) as *mut _ }
     }
 }

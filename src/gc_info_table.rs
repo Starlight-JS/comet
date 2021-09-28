@@ -15,11 +15,11 @@ use crate::internal::{
 use crate::mmap::Mmap;
 
 /// GCInfo contains metadata for objects.
+#[repr(C)]
 pub struct GCInfo {
     pub finalize: Option<FinalizationCallback>,
     pub trace: TraceCallback,
     pub vtable: usize,
-    pub name: &'static str,
 }
 
 pub struct GCInfoTable {

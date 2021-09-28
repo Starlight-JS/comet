@@ -39,6 +39,7 @@ impl<T: FnMut(&mut Visitor)> MarkingConstraint for T {
 }
 thread_local! {static BOUNDS: StackBounds = StackBounds::current_thread_stack_bounds();}
 
+#[repr(C)]
 #[allow(dead_code)]
 pub struct Heap {
     pub(crate) global: GlobalAllocator,
