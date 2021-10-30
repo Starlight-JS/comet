@@ -1,8 +1,12 @@
 [package]
 name = "comet"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2018"
-
+authors = ["Adel Prokurov <pr.adelprokurov@yandex.ru>"]
+repository = "https://github.com/Starlight-JS/comet"
+readme = "README.md"
+keywords = ["memory","gc","automatic"]
+description = "Garbage collection library for implementing VMs in Rust"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -15,7 +19,7 @@ backtrace = "*"
 crossbeam-utils = "0.8"
 
 [target.'cfg(not(wasm))'.dependencies]
-memmap2 = "0.3"
+memmap2 = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = [
