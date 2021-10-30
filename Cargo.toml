@@ -6,6 +6,7 @@ authors = ["Adel Prokurov <pr.adelprokurov@yandex.ru>"]
 repository = "https://github.com/Starlight-JS/comet"
 readme = "README.md"
 keywords = ["memory","gc","automatic"]
+license = "MIT"
 description = "Garbage collection library for implementing VMs in Rust"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
