@@ -1,5 +1,5 @@
 [package]
-name = "comet"
+name = "comet-gc"
 version = "0.1.1"
 edition = "2018"
 authors = ["Adel Prokurov <pr.adelprokurov@yandex.ru>"]
