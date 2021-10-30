@@ -4,8 +4,12 @@ use crate::gc_info_table::{GCInfo, GC_TABLE};
 
 use super::{finalize_trait::FinalizeTrait, trace_trait::TraceTrait};
 
+/// Trait determines how the garbage collector treats objects wrt. to traversing,
+/// and finalization. It is automatically implemented for all types that implement [TraceTrait](crate::internal::trace_trait::TraceTrait) and 
+/// [FinalizeTrait](crate::internal::finalize_trait::FinalizeTrait).
 pub trait GCInfoTrait<T: TraceTrait + FinalizeTrait<T> + Sized + 'static> {
     const REGISTERED_INDEX: AtomicU16;
+    /// Returns index of [GCInfo](crate::gc_info_table::GCInfo) in [GCInfoTable](crate::gc_info_table::GCInfoTable).
     fn index() -> GCInfoIndex;
 }
 

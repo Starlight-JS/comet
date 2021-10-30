@@ -2,32 +2,30 @@ use crate::internal::gc_info::GCInfoIndex;
 use modular_bitfield::prelude::*;
 use std::mem::size_of;
 
-// HeapObjectHeader contains meta data per object and is prepended to each
-// object.
-//
-// +-----------------+------+------------------------------------------+
-// | name            | bits |                                          |
-// +-----------------+------+------------------------------------------+
-// | padding         |   32 | Only present on 64-bit platform.         |
-// +-----------------+------+------------------------------------------+
-// | GCInfoIndex     |   14 |                                          |
-// | unused          |    1 |                                          |
-// | unused          |    1 | In construction encoded as |false|.      |
-// +-----------------+------+------------------------------------------+
-// | size            |   13 | 17 bits because allocations are aligned. |
-// | unused          |    1 |                                          |
-// | cell state      |    2 |                                          |
-// +-----------------+------+------------------------------------------+
-//
-// Notes:
-// - See [GCInfoTable] for constraints on GCInfoIndex.
-// - |size| for regular objects is encoded with 14 bits but can actually
-//   represent sizes up to |kBlinkPageSize| (2^17) because allocations are
-//   always 8 byte aligned (see kAllocationGranularity).
-// - |size| for large objects is encoded as 0. The size of a large object is
-//   stored in |LargeObjectPage::PayloadSize()|.
-// - |mark bit| and |in construction| bits are located in separate 16-bit halves
-//    to allow potentially accessing them non-atomically.
+/// HeapObjectHeader contains meta data per object and is prepended to each
+/// object.
+///```
+/// +-----------------+------+------------------------------------------+
+/// | name            | bits |                                          |
+/// +-----------------+------+------------------------------------------+
+/// | padding         |   32 | Only present on 64-bit platform.         |
+/// +-----------------+------+------------------------------------------+
+/// | GCInfoIndex     |   14 |                                          |
+/// | unused          |    1 |                                          |
+/// | unused          |    1 | In construction encoded as |false|.      |
+/// +-----------------+------+------------------------------------------+
+/// | size            |   13 | 17 bits because allocations are aligned. |
+/// | unused          |    1 |                                          |
+/// | cell state      |    2 |                                          |
+/// +-----------------+------+------------------------------------------+
+///```
+/// Notes:
+/// - See [GCInfoTable](crate::gc_info_table::GCInfoTable) for constraints on GCInfoIndex.
+/// - `size` for regular objects is encoded with 14 bits but can actually
+///   represent sizes up to |kBlinkPageSize| (2^17) because allocations are
+///   always 8 byte aligned (see kAllocationGranularity).
+/// - `size` for large objects is encoded as 0. The size of a large object is
+///   stored in [PreciseAllocation::cell_size](crate::large_space::PreciseAllocation::cell_size).
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct HeapObjectHeader {
@@ -40,21 +38,25 @@ pub struct HeapObjectHeader {
 pub const ALLOCATION_GRANULARITY: usize = size_of::<usize>();
 
 impl HeapObjectHeader {
+    /// Check if allocation is "precise". Precise allocations are large allocations that have larger header stored behind `HeapObjectHeader`. 
     pub fn is_precise(&self) -> bool {
         self.get_size() == 0
     }
+    /// Set this header as free. 
     pub fn set_free(&mut self) {
         self.encoded_low = 0;
     }
-
+    /// Creates heap object header from object pointer. It must be valid pointer. 
     #[inline(always)]
-    pub fn from_object(obj: *const u8) -> *mut Self {
+    pub unsafe fn from_object(obj: *const u8) -> *mut Self {
         (obj as usize - size_of::<Self>()) as _
     }
+    /// Returns payload of this heap object header. 
     #[inline(always)]
     pub fn payload(&self) -> *const u8 {
         (self as *const Self as usize + size_of::<Self>()) as _
     }
+    /// Returns [GCInfoIndex] of allocated object. 
     #[inline(always)]
     pub fn get_gc_info_index(&self) -> GCInfoIndex {
         debug_assert!(

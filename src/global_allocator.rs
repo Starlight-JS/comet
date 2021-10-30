@@ -18,6 +18,11 @@ pub const fn round_up(x: usize, y: usize) -> usize {
     ((x) + (y - 1)) & !(y - 1)
 }
 
+
+/// Global allocator is an storage for:
+/// - Immix blocks used for small allocations
+/// - Large object space used for large allocations
+/// - bitmaps that are used for conservative marking and marking individual block lines
 pub struct GlobalAllocator {
     pub(crate) block_allocator: Box<BlockAllocator>,
     pub(crate) large_space: LargeObjectSpace,

@@ -1,6 +1,5 @@
 use crate::{
     block::Block,
-    global_allocator::round_up,
     globals::LINE_SIZE,
     header::HeapObjectHeader,
     internal::{block_list::BlockList, space_bitmap::SpaceBitmap},

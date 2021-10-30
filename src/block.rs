@@ -24,7 +24,7 @@ impl Block {
         self.allocated = 0xdeadbeef;
     }
     pub fn offset(&self, offset: usize) -> *mut u8 {
-        let x = (self as *const Self as usize + offset);
+        let x = self as *const Self as usize + offset;
         debug_assert!(
             x >= self.begin() as usize && x <= self.end() as usize,
             "overflow {:x} (end={:p})",

@@ -64,6 +64,8 @@ pub mod marking;
 pub mod mmap;
 pub mod task_scheduler;
 pub mod visitor;
+
+
 pub struct GCPlatform;
 
 impl GCPlatform {
@@ -84,18 +86,20 @@ impl GCPlatform {
     }
 }
 
+/// Configuration for heap constructor.
 #[repr(C)]
 pub struct Config {
+    /// How fast heap threshold should grow
     pub heap_growth_factor: f64,
-    pub heap_growth_threshold: f64,
-    pub large_heap_growth_factor: f64,
-    pub large_heap_growth_threshold: f64,
-    pub dump_size_classes: bool,
-    pub size_class_progression: f64,
+    /// Heap size. It is heap size only for Immix block space. LargeObjectSpace will allocate until System OOMs
     pub heap_size: usize,
+    /// Maximum heap size before first GC
     pub max_heap_size: usize,
+    /// Maximum eden heap size before first GC (does not matter atm)
     pub max_eden_size: usize,
+    /// Enables verbose printing
     pub verbose: bool,
+    /// Enable generational GC (does not work atm)
     pub generational: bool,
 }
 
@@ -107,16 +111,12 @@ impl Default for Config {
             max_eden_size: 64 * 1024,
             max_heap_size: 256 * 1024,
             heap_growth_factor: 1.5,
-            heap_growth_threshold: 0.78,
-            large_heap_growth_factor: 1.5,
-            large_heap_growth_threshold: 0.9,
-            dump_size_classes: false,
-            size_class_progression: 1.4,
             heap_size: 1 * 1024 * 1024 * 1024,
         }
     }
 }
 
+/// Returns GC allocation size of object. 
 pub fn gc_size(ptr: *const HeapObjectHeader) -> usize {
     unsafe {
         let size = (*ptr).get_size();

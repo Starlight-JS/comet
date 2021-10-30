@@ -14,14 +14,20 @@ use crate::internal::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mmap::Mmap;
 
-/// GCInfo contains metadata for objects.
+/// GCInfo contains metadata for objects that implement `GCInfoTrait`.
 #[repr(C)]
 pub struct GCInfo {
+    /// Finalization callback
     pub finalize: Option<FinalizationCallback>,
+    /// Tracing callback
     pub trace: TraceCallback,
+    /// Additional vtable pointer. This is not used in any way by Comet but might be used by 
+    /// programmers to store vtable by runtimes without occupying additional 8/4 bytes of space
+    /// in allocation itself.
     pub vtable: usize,
 }
 
+/// Efficent storage for [GCInfo].
 pub struct GCInfoTable {
     #[cfg(not(wasm))]
     map: Mmap,

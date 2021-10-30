@@ -6,13 +6,15 @@ use crate::{
 };
 
 pub trait VisitorTrait {
+    /// Visits object with provided [TraceDescriptor]. 
     fn visit(&mut self, this: *const u8, descriptor: TraceDescriptor) {
         let _ = this;
         let _ = descriptor;
     }
-
+    /// Visits objects in `from` to `to` range conservatively. This function will read gc info index from
+    /// each object that is found in memory range and obtain TraceDescriptor from that.
     fn visit_conservative(&mut self, from: *const *const u8, to: *const *const u8);
-
+    
     fn heap(&self) -> *mut Heap;
 }
 
@@ -39,13 +41,13 @@ impl Visitor {
     pub fn trace_ref<T: TraceTrait>(&mut self, object: &T) {
         <T as TraceTrait>::trace(object, self);
     }
-
+    /// Traces typed gc reference. 
     pub fn trace_gcref<T: TraceTrait>(&mut self, object: GcRef<T>) {
         unsafe {
             self.trace(object.downcast().get() as *mut T);
         }
     }
-
+    /// Traces untyped gc reference.
     pub fn trace_untyped(&mut self, object: UntypedGcRef) {
         unsafe {
             let header = &*object.header.as_ptr();

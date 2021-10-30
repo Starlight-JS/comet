@@ -6,11 +6,14 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{
-    header::HeapObjectHeader,
-    internal::{finalize_trait::FinalizeTrait, gc_info::GCInfoTrait, trace_trait::TraceTrait},
-};
-
+use crate::{header::HeapObjectHeader, internal::{finalize_trait::FinalizeTrait, gc_info::{GCInfoIndex, GCInfoTrait}, trace_trait::TraceTrait}};
+/// A *typed* garbage collected pointer to a value.
+///
+/// This is the equivalent of a garbage collected smart-pointer.
+/// 
+/// The smart pointer is simply a guarantee to the garbage collector
+/// that this points to a garbage collected object with the correct header,
+/// and not some arbitrary bits that you've decided to heap allocate.
 #[repr(C)]
 pub struct GcRef<T> {
     pub(crate) raw: UntypedGcRef,
@@ -38,6 +41,13 @@ impl<T> DerefMut for GcRef<T> {
     }
 }
 
+/// A *untyped* garbage collected pointer to a value, you can think of it as `void*` pointer but managed by GC.
+///
+/// This is the equivalent of a garbage collected smart-pointer.
+/// 
+/// The smart pointer is simply a guarantee to the garbage collector
+/// that this points to a garbage collected object with the correct header,
+/// and not some arbitrary bits that you've decided to heap allocate.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct UntypedGcRef {
@@ -45,9 +55,18 @@ pub struct UntypedGcRef {
 }
 
 impl UntypedGcRef {
+    /// Returns data part of GC object. That is part of allocation *after* heap object header. 
     pub fn get(&self) -> *mut u8 {
         unsafe { (*self.header.as_ptr()).payload() as _ }
     }
+    /// Returns true if object has the same `index`. 
+    pub fn is(&self,index: GCInfoIndex) -> bool {
+        unsafe {
+            let header = &*self.header.as_ptr();
+            header.get_gc_info_index() == index
+        }
+    }
+    /// Returns Some(T) if `T::index()` is the same as in this object. 
     pub fn cast<T: GCInfoTrait<T> + TraceTrait + FinalizeTrait<T> + 'static>(
         self,
     ) -> Option<GcRef<T>> {
@@ -63,7 +82,7 @@ impl UntypedGcRef {
             }
         }
     }
-
+    /// Unchecked cast withouth verifying indexes. 
     pub unsafe fn cast_unchecked<T: GCInfoTrait<T> + TraceTrait + FinalizeTrait<T> + 'static>(
         self,
     ) -> GcRef<T> {
@@ -105,6 +124,8 @@ pub struct WeakSlot {
 impl FinalizeTrait<WeakSlot> for WeakSlot {}
 impl TraceTrait for WeakSlot {}
 
+
+/// Weak GC reference. Has almost the same semantics as [std::rc::Weak]
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct WeakGcRef {

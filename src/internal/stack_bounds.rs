@@ -1,3 +1,5 @@
+
+/// Stack bounds for conservative stack marking. 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StackBounds {
     pub origin: *mut u8,

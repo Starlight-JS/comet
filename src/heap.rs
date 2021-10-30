@@ -1,6 +1,5 @@
 use crate::{
     allocator::Allocator,
-    block::Block,
     gcref::{GcRef, UntypedGcRef, WeakGcRef, WeakSlot},
     global_allocator::{round_up, GlobalAllocator},
     globals::{LARGE_CUTOFF, MEDIUM_CUTOFF},
@@ -39,6 +38,14 @@ impl<T: FnMut(&mut Visitor)> MarkingConstraint for T {
 }
 thread_local! {static BOUNDS: StackBounds = StackBounds::current_thread_stack_bounds();}
 
+
+
+/// Comet heap. It stores all the required global data:
+/// - [GlobalAllocator](crate::global_allocator::GlobalAllocator) instance
+/// - Callbacks that are run before GC cycle
+/// - Threshold and allocations of current GC cycle
+/// - Number of deferred GC cycles
+/// - Weak references
 #[repr(C)]
 #[allow(dead_code)]
 pub struct Heap {
@@ -69,7 +76,9 @@ pub struct Heap {
 }
 
 impl Heap {
-    /// Walks all cells allocated in the heap.
+    /// This function will iterate through each object allocated in heap. Separate callbacks are used for weak refs and regular objects.
+    /// 
+    /// NOTE: callback for regular object *might* receive weak ref pointer in it too.
     pub fn for_each_cell(
         &mut self,
 
@@ -86,11 +95,11 @@ impl Heap {
             });
         }
     }
-
+    /// Adds GC constraint into constraints vector. Each constraint is ran before GC cycle. 
     pub fn add_constraint(&mut self, constraint: impl MarkingConstraint + 'static) {
         self.constraints.push(Box::new(constraint));
     }
-
+    /// Adds core GC constraints into constraint vector. For now it is just conservative stack marking constraint.
     pub fn add_core_constraints(&mut self) {
         self.add_constraint(|visitor: &mut Visitor| unsafe {
             let heap = &mut *visitor.heap();
@@ -105,7 +114,7 @@ impl Heap {
             visitor.trace_conservatively(from, to)
         });
     }
-
+    /// Creates new heap instance with configuration from `config`.
     pub fn new(config: Config) -> Box<Self> {
         let mut this = Box::new(Self {
             constraints: Vec::new(),
@@ -144,13 +153,15 @@ impl Heap {
         // Sweep global allocator
         self.global.sweep(blocks);
     }
-
+    /// Force collect garbage. If GC is deferred nothing will happen. 
     pub fn collect_garbage(&mut self) {
         if self.defers.load(atomic::Ordering::SeqCst) > 0 {
             return;
         }
         self.perform_garbage_collection();
     }
+
+    /// Collects garbage if necessary i.e allocates bytes are greater than threshold. 
     #[allow(dead_code)]
     pub fn collect_if_necessary_or_defer(&mut self) {
         if self.defers.load(atomic::Ordering::Relaxed) > 0 {
@@ -163,7 +174,7 @@ impl Heap {
             }
         }
     }
-
+    /// Allocate weak reference for specified GC pointer. 
     pub unsafe fn allocate_weak(&mut self, target: UntypedGcRef) -> WeakGcRef {
         let ptr = self.allocate_raw_or_fail(
             size_of::<WeakSlot>() + size_of::<HeapObjectHeader>(),
@@ -177,7 +188,12 @@ impl Heap {
             slot: ptr.cast_unchecked(),
         }
     }
-
+    /// Allocate "raw" memory. This memory is not initialized at all (except header part of UntypedGcRef).
+    /// - `size` should include size for object you're allocating and additional bytes for [HeapObjectHeader]. If it is 
+    /// embedded in your struct as first field you do not have to include that. 
+    /// - `index` should be an index obtained by calling `T::index()` on type that implements [GCInfoTrait](crate::internal::gc_info::GCInfoTrait)
+    /// 
+    /// This function returns none if allocation is failed. 
     pub unsafe fn allocate_raw(&mut self, size: usize, index: GCInfoIndex) -> Option<UntypedGcRef> {
         let size = round_up(size, 8);
         let cell = if size >= LARGE_CUTOFF {
@@ -215,6 +231,8 @@ impl Heap {
             }
         })
     }
+
+
     #[cold]
     unsafe fn try_perform_collection_and_allocate_again(
         &mut self,
@@ -231,6 +249,7 @@ impl Heap {
         eprintln!("Allocation of {} bytes failed: OOM", size);
         std::process::abort();
     }
+    /// Same as [Heap::allocate_raw] except it will try to perform GC cycle and if GC does not free enough memory it will abort.
     pub unsafe fn allocate_raw_or_fail(&mut self, size: usize, index: GCInfoIndex) -> UntypedGcRef {
         let mem = self.allocate_raw(size, index);
         if mem.is_none() {
@@ -354,6 +373,8 @@ impl Heap {
     }
 }
 
+
+/// Defer point. GC cycle is deferred when instance of this struct is alive.
 pub struct DeferPoint {
     defers: &'static AtomicUsize,
 }

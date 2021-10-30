@@ -1,11 +1,11 @@
-use crate::globals::IMMIX_BLOCK_SIZE;
+
 #[cfg(windows)]
 pub mod _win {
     use super::*;
 
     use core::{ptr::null_mut, usize};
     use std::mem::size_of;
-
+    use crate::globals::IMMIX_BLOCK_SIZE;
     use winapi::um::{
         memoryapi::{VirtualAlloc, VirtualFree},
         winnt::{MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE},
@@ -83,7 +83,6 @@ pub mod _unix {
 
     use crate::globals::IMMIX_BLOCK_SIZE;
 
-    use super::*;
     pub struct Mmap {
         start: *mut u8,
         end: *mut u8,
