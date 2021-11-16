@@ -3,21 +3,6 @@ use std::mem::size_of;
 use gc_info_table::GCInfo;
 use header::HeapObjectHeader;
 use large_space::PreciseAllocation;
-/// Just like C's offsetof.
-///
-/// The magic number 0x4000 is insignificant. We use it to avoid using NULL, since
-/// NULL can cause compiler problems, especially in cases of multiple inheritance.
-#[macro_export]
-macro_rules! offsetof {
-    ($name : ident . $($field: ident).*) => {
-        unsafe {
-            let uninit = std::mem::transmute::<_,*const $name>(0x4000usize);
-            let fref = &(&*uninit).$($field).*;
-            let faddr = fref as *const _ as usize;
-            faddr - 0x4000
-        }
-    }
-}
 
 macro_rules! as_atomic {
     ($value: expr;$t: ident) => {
@@ -64,7 +49,6 @@ pub mod marking;
 pub mod mmap;
 pub mod task_scheduler;
 pub mod visitor;
-
 
 pub struct GCPlatform;
 
@@ -116,7 +100,7 @@ impl Default for Config {
     }
 }
 
-/// Returns GC allocation size of object. 
+/// Returns GC allocation size of object.
 pub fn gc_size(ptr: *const HeapObjectHeader) -> usize {
     unsafe {
         let size = (*ptr).get_size();
