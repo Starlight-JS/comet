@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::{ptr::null_mut, sync::atomic::Ordering};
 
 use crate::{
     block::Block, globals::IMMIX_BLOCK_SIZE, internal::block_list::AtomicBlockList, mmap::Mmap,
@@ -45,7 +45,10 @@ impl BlockAllocator {
     /// Get a new block aligned to `BLOCK_SIZE`.
     pub fn get_block(&self) -> *mut Block {
         match self.free_blocks.take_free() {
-            x if x.is_null() => self.build_block().expect("Out of memory"),
+            x if x.is_null() => match self.build_block() {
+                Some(x) => x,
+                None => null_mut(),
+            },
             x => {
                 self.mmap.commit(x as _, IMMIX_BLOCK_SIZE);
                 Block::new(x as _);
@@ -95,7 +98,7 @@ impl BlockAllocator {
         unsafe {
             (*block).allocated = 0;
         }
-        self.mmap.dontneed(block as *mut u8, IMMIX_BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
+        //self.mmap.dontneed(block as *mut u8, IMMIX_BLOCK_SIZE); // MADV_DONTNEED or MEM_DECOMMIT
         unsafe {
             self.free_blocks.add_free(block);
         }

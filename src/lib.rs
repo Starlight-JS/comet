@@ -47,6 +47,7 @@ pub mod internal;
 pub mod large_space;
 pub mod marking;
 pub mod mmap;
+pub mod statistics;
 pub mod task_scheduler;
 pub mod visitor;
 
@@ -93,7 +94,7 @@ impl Default for Config {
             generational: false,
             verbose: false,
             max_eden_size: 64 * 1024,
-            max_heap_size: 256 * 1024,
+            max_heap_size: 256 * 1024 * 1024,
             heap_growth_factor: 1.5,
             heap_size: 1 * 1024 * 1024 * 1024,
         }

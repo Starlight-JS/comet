@@ -59,7 +59,7 @@ impl VisitorTrait for MarkingVisitor {
                                 != GCInfoIndex(0)
                         {
                             let hdr = cell.cast::<HeapObjectHeader>();
-
+                            (*self.h).objects_found_conservatively += 1;
                             self.visit((*hdr).payload(), trace_desc(hdr as _));
                         }
                     }
@@ -67,6 +67,7 @@ impl VisitorTrait for MarkingVisitor {
                     let hdr = (*self.heap).large_space.contains(pointer);
 
                     if !hdr.is_null() {
+                        (*self.h).objects_found_conservatively += 1;
                         self.visit((*hdr).payload(), trace_desc(hdr));
                     }
                 }

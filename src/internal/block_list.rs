@@ -43,6 +43,11 @@ impl BlockList {
     pub fn new() -> Self {
         Self { head: null_mut() }
     }
+    pub fn len(&self) -> usize {
+        let mut c = 0;
+        self.for_each(|_| c += 1);
+        c
+    }
     pub fn for_each(&self, mut visitor: impl FnMut(*mut Block)) {
         unsafe {
             let mut head = self.head;

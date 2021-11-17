@@ -16,13 +16,13 @@ pub struct NormalAllocator {
     pub(crate) block_allocator: *mut BlockAllocator,
 
     /// The exhausted blocks.
-    unavailable_blocks: BlockList,
+    pub(crate) unavailable_blocks: BlockList,
 
     /// The blocks with holes to recycle before requesting new blocks..
     pub(crate) recyclable_blocks: BlockList,
 
     /// The current block to allocate from.
-    current_block: Option<BlockTuple>,
+    pub(crate) current_block: Option<BlockTuple>,
     pub(crate) line_bitmap: *const SpaceBitmap<LINE_SIZE>,
 }
 impl NormalAllocator {

@@ -1,4 +1,5 @@
-/// Small wrapper over Comet API for ease of use. 
+use comet::gcref::GcRef;
+/// Small wrapper over Comet API for ease of use.
 use comet::gcref::UntypedGcRef;
 use comet::header::HeapObjectHeader;
 use comet::heap::{DeferPoint, Heap as CometHeap, MarkingConstraint};
@@ -6,7 +7,6 @@ pub use comet::internal::finalize_trait::FinalizeTrait as Finalize;
 use comet::internal::gc_info::{GCInfoIndex, GCInfoTrait};
 pub use comet::internal::trace_trait::TraceTrait as Trace;
 pub use comet::visitor::Visitor;
-use comet::gcref::GcRef;
 use mopa::mopafy;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -14,7 +14,7 @@ use std::mem::{size_of, transmute};
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
-/// Wrapper over Comet heap. 
+/// Wrapper over Comet heap.
 pub struct Heap {
     pub heap: Box<CometHeap>,
 }
@@ -39,26 +39,32 @@ impl MarkingConstraint for SimpleMarkingConstraint {
 }
 
 impl Heap {
-    /// Creates GC defer point. 
+    /// Creates GC defer point.
     pub fn defer(&self) -> DeferPoint {
         DeferPoint::new(&self.heap)
     }
-
+    pub fn total_gc_cycles_count(&self) -> usize {
+        self.heap.total_gc_cycles_count()
+    }
     /// Creates new Comet heap. if `size` is < 1MB then it will be set to 1GB by default.
-    pub fn new(size: Option<usize>) -> Self {
+    pub fn new(verbose: bool, size: Option<usize>) -> Self {
         let mut configs = comet::Config::default();
         if let Some(size) = size {
             if size >= 1024 * 1024 {
                 configs.heap_size = size;
             }
-        } 
+        }
+        configs.verbose = verbose;
         let mut heap = CometHeap::new(configs);
         heap.add_core_constraints();
         Self { heap }
     }
-    /// Triggers GC cycle. 
+    /// Triggers GC cycle.
     pub fn gc(&mut self) {
         self.heap.collect_garbage();
+    }
+    pub fn statistics(&self) -> comet::statistics::HeapStatistics {
+        self.heap.statistics()
     }
 
     /// Allocates GcPointerBase in Comet heap with all internal fields initialized correctly
@@ -95,7 +101,7 @@ impl Heap {
             .as_ptr()
     }
 
-    /// Allocates `T` on the GC heap with initializing all data correctly. 
+    /// Allocates `T` on the GC heap with initializing all data correctly.
     pub fn allocate<T: GcCell + GCInfoTrait<T> + Trace + Finalize<T>>(
         &mut self,
         value: T,
@@ -117,12 +123,12 @@ impl Heap {
         self.heap.for_each_cell(&point, callback, weak_refs)
     }*/
 
-    /// Adds constraint to be executed before each gc cycle. 
+    /// Adds constraint to be executed before each gc cycle.
     pub fn add_constraint(&mut self, constraint: impl MarkingConstraint + 'static) {
         self.heap.add_constraint(constraint);
     }
 
-    /// Allocates weak ref for `T`. 
+    /// Allocates weak ref for `T`.
     pub fn make_weak<T: GcCell>(&mut self, target: GcPointer<T>) -> WeakRef<T> {
         let weak = unsafe { self.heap.allocate_weak(std::mem::transmute(target)) };
         WeakRef {
@@ -150,25 +156,25 @@ pub trait GcCell: mopa::Any {
 
 mopafy!(GcCell);
 
-/// GC collected smart-pointer. It allows `T` to be `?Sized` for dynamic casts. 
+/// GC collected smart-pointer. It allows `T` to be `?Sized` for dynamic casts.
 #[repr(transparent)]
 pub struct GcPointer<T: GcCell + ?Sized> {
     base: NonNull<GcPointerBase>,
     marker: PhantomData<T>,
 }
 
-/// GC object header. 
+/// GC object header.
 #[repr(C)]
 pub struct GcPointerBase {
     hdr: HeapObjectHeader,
 }
 
 impl<T: GcCell + ?Sized> GcPointer<T> {
-    /// Returns untyped GC ref from this pointer. 
+    /// Returns untyped GC ref from this pointer.
     pub fn untyped(self) -> UntypedGcRef {
         unsafe { std::mem::transmute(self) }
     }
-    /// Pointer equality. 
+    /// Pointer equality.
     pub fn ptr_eq<U: GcCell + ?Sized>(this: &Self, other: &GcPointer<U>) -> bool {
         this.base == other.base
     }
@@ -181,7 +187,7 @@ impl<T: GcCell + ?Sized> GcPointer<T> {
             marker: PhantomData,
         }
     }
-    /// Check if this GC pointer stores `U`. 
+    /// Check if this GC pointer stores `U`.
     #[inline]
     pub fn is<U: Trace + Finalize<U> + GcCell + GCInfoTrait<U>>(self) -> bool {
         unsafe { (*self.base.as_ptr()).hdr.get_gc_info_index() == U::index() }
@@ -196,7 +202,7 @@ impl<T: GcCell + ?Sized> GcPointer<T> {
     pub fn get_dyn_mut(&mut self) -> &mut dyn GcCell {
         unsafe { (*self.base.as_ptr()).get_dyn() }
     }
-    /// Unchecked downcast to `U`. 
+    /// Unchecked downcast to `U`.
     #[inline]
     pub unsafe fn downcast_unchecked<U: GcCell>(self) -> GcPointer<U> {
         GcPointer {
@@ -204,7 +210,7 @@ impl<T: GcCell + ?Sized> GcPointer<T> {
             marker: PhantomData,
         }
     }
-    /// Checked downcast to type `U`. 
+    /// Checked downcast to type `U`.
     #[inline]
     pub fn downcast<U: Trace + Finalize<U> + GcCell + GCInfoTrait<U>>(
         self,
@@ -218,7 +224,7 @@ impl<T: GcCell + ?Sized> GcPointer<T> {
 }
 
 impl GcPointerBase {
-    /// Returns alloction size. 
+    /// Returns alloction size.
     pub fn allocation_size(&self) -> usize {
         comet::gc_size(&self.hdr)
     }
@@ -284,7 +290,7 @@ impl<T: GcCell + std::fmt::Display> std::fmt::Display for GcPointer<T> {
     }
 }
 
-/// Weak reference wrapper. 
+/// Weak reference wrapper.
 pub struct WeakRef<T: GcCell> {
     ref_: comet::gcref::WeakGcRef,
     marker: PhantomData<T>,
@@ -354,5 +360,5 @@ impl<T: GcCell> Trace for WeakRef<T> {
 
 impl<T: GcCell> GcCell for GcPointer<T> {}
 
-pub use comet::internal::{trace_trait::*,finalize_trait::*,gc_info::*};
-pub use comet::{header::*,*,gc_info_table::*};
+pub use comet::internal::{finalize_trait::*, gc_info::*, trace_trait::*};
+pub use comet::{gc_info_table::*, header::*, *};

@@ -2,7 +2,7 @@ use crate::{
     allocator::Allocator,
     gcref::{GcRef, UntypedGcRef, WeakGcRef, WeakSlot},
     global_allocator::{round_up, GlobalAllocator},
-    globals::{LARGE_CUTOFF, MEDIUM_CUTOFF},
+    globals::{IMMIX_BLOCK_SIZE, LARGE_CUTOFF, MEDIUM_CUTOFF},
     header::HeapObjectHeader,
     internal::{
         block_list::BlockList,
@@ -12,6 +12,7 @@ use crate::{
     },
     large_space::PreciseAllocation,
     marking::SynchronousMarking,
+    statistics::HeapStatistics,
     visitor::Visitor,
     Config,
 };
@@ -72,9 +73,48 @@ pub struct Heap {
     last_collection_scope: Option<CollectionScope>,
     pub(crate) weak_references: Vec<GcRef<WeakSlot>>,
     pub(crate) total_gc_count: usize,
+    pub(crate) total_obj_allocations: usize,
+    pub(crate) total_mem_allocated: usize,
+    pub(crate) objects_found_conservatively: usize,
 }
 
 impl Heap {
+    pub fn statistics(&self) -> HeapStatistics {
+        let large_count = self.global.large_space.allocations.len();
+        let large_size = self
+            .global
+            .large_space
+            .allocations
+            .iter()
+            .fold(0usize, |acc, x| unsafe { acc + (**x).cell_size() });
+        let immix_blocks = self.global.normal_allocator.recyclable_blocks.len()
+            + self.global.normal_allocator.unavailable_blocks.len()
+            + self.global.overflow_allocator.unavailable_blocks.len()
+            + self
+                .global
+                .normal_allocator
+                .current_block
+                .map(|_| 1)
+                .unwrap_or_else(|| 0)
+            + self
+                .global
+                .overflow_allocator
+                .current_block
+                .map(|_| 1)
+                .unwrap_or_else(|| 0);
+        HeapStatistics {
+            large_allocations: large_count,
+            memory_allocated_for_large_space: large_size,
+            immix_blocks,
+            memory_allocated_for_immix_blocks: immix_blocks * IMMIX_BLOCK_SIZE,
+            immix_space_size: self.global.block_allocator.size(),
+            heap_threshold: self.max_heap_size,
+            total_gc_cycles_count: self.total_gc_cycles_count(),
+            total_memory_allocated: self.total_mem_allocated,
+            total_objects_allocated: self.total_obj_allocations,
+            total_objects_found_on_stack: self.objects_found_conservatively,
+        }
+    }
     pub fn total_gc_cycles_count(&self) -> usize {
         return self.total_gc_count;
     }
@@ -119,6 +159,9 @@ impl Heap {
     /// Creates new heap instance with configuration from `config`.
     pub fn new(config: Config) -> Box<Self> {
         let mut this = Box::new(Self {
+            total_mem_allocated: 0,
+            total_obj_allocations: 0,
+            objects_found_conservatively: 0,
             total_gc_count: 0,
             constraints: Vec::new(),
             generational_gc: config.generational,
@@ -170,7 +213,7 @@ impl Heap {
         if self.defers.load(atomic::Ordering::Relaxed) > 0 {
             return;
         } else {
-            let bytes_allowed = self.max_eden_size;
+            let bytes_allowed = self.max_heap_size;
 
             if self.bytes_allocated_this_cycle >= bytes_allowed {
                 self.collect_garbage();
@@ -207,6 +250,7 @@ impl Heap {
             self.global.overflow_allocator.allocate(size)
         };
         cell.map(|x| {
+            //assert!(!x.is_null());
             (*x).set_size(size);
 
             self.bytes_allocated_this_cycle += size;
@@ -228,6 +272,8 @@ impl Heap {
                 "object at {:p} was already allocated!",
                 x
             );
+            self.total_obj_allocations += 1;
+            self.total_mem_allocated += size;
             self.global.live_bitmap.set(x as _);
             UntypedGcRef {
                 header: NonNull::new_unchecked(x),
@@ -327,8 +373,12 @@ impl Heap {
         // To avoid pathological GC churn in very small and very large heaps, we set
         // the new allocation limit based on the current size of the heap, with a
         // fixed minimum.
-        self.max_heap_size =
-            (self.config.heap_growth_factor * current_heap_size as f64).ceil() as _;
+
+        self.max_heap_size = if current_heap_size >= self.max_heap_size {
+            (self.config.heap_growth_factor * current_heap_size as f64).ceil() as _
+        } else {
+            self.max_heap_size
+        };
         self.max_eden_size = self.max_heap_size - current_heap_size;
         self.size_after_last_full_collect = current_heap_size;
 

@@ -15,10 +15,10 @@ pub struct OverflowAllocator {
     pub(crate) block_allocator: *mut BlockAllocator,
     pub(crate) line_bitmap: *const SpaceBitmap<LINE_SIZE>,
     /// The exhausted blocks.
-    unavailable_blocks: BlockList,
+    pub(crate) unavailable_blocks: BlockList,
 
     /// The current block to allocate from.
-    current_block: Option<BlockTuple>,
+    pub(crate) current_block: Option<BlockTuple>,
 }
 
 impl OverflowAllocator {

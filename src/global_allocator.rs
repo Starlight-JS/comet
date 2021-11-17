@@ -18,7 +18,6 @@ pub const fn round_up(x: usize, y: usize) -> usize {
     ((x) + (y - 1)) & !(y - 1)
 }
 
-
 /// Global allocator is an storage for:
 /// - Immix blocks used for small allocations
 /// - Large object space used for large allocations
