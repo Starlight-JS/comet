@@ -38,8 +38,6 @@ impl<T: FnMut(&mut Visitor)> MarkingConstraint for T {
 }
 thread_local! {static BOUNDS: StackBounds = StackBounds::current_thread_stack_bounds();}
 
-
-
 /// Comet heap. It stores all the required global data:
 /// - [GlobalAllocator](crate::global_allocator::GlobalAllocator) instance
 /// - Callbacks that are run before GC cycle
@@ -73,11 +71,15 @@ pub struct Heap {
     collection_scope: Option<CollectionScope>,
     last_collection_scope: Option<CollectionScope>,
     pub(crate) weak_references: Vec<GcRef<WeakSlot>>,
+    pub(crate) total_gc_count: usize,
 }
 
 impl Heap {
+    pub fn total_gc_cycles_count(&self) -> usize {
+        return self.total_gc_count;
+    }
     /// This function will iterate through each object allocated in heap. Separate callbacks are used for weak refs and regular objects.
-    /// 
+    ///
     /// NOTE: callback for regular object *might* receive weak ref pointer in it too.
     pub fn for_each_cell(
         &mut self,
@@ -95,7 +97,7 @@ impl Heap {
             });
         }
     }
-    /// Adds GC constraint into constraints vector. Each constraint is ran before GC cycle. 
+    /// Adds GC constraint into constraints vector. Each constraint is ran before GC cycle.
     pub fn add_constraint(&mut self, constraint: impl MarkingConstraint + 'static) {
         self.constraints.push(Box::new(constraint));
     }
@@ -117,6 +119,7 @@ impl Heap {
     /// Creates new heap instance with configuration from `config`.
     pub fn new(config: Config) -> Box<Self> {
         let mut this = Box::new(Self {
+            total_gc_count: 0,
             constraints: Vec::new(),
             generational_gc: config.generational,
 
@@ -153,7 +156,7 @@ impl Heap {
         // Sweep global allocator
         self.global.sweep(blocks);
     }
-    /// Force collect garbage. If GC is deferred nothing will happen. 
+    /// Force collect garbage. If GC is deferred nothing will happen.
     pub fn collect_garbage(&mut self) {
         if self.defers.load(atomic::Ordering::SeqCst) > 0 {
             return;
@@ -161,7 +164,7 @@ impl Heap {
         self.perform_garbage_collection();
     }
 
-    /// Collects garbage if necessary i.e allocates bytes are greater than threshold. 
+    /// Collects garbage if necessary i.e allocates bytes are greater than threshold.
     #[allow(dead_code)]
     pub fn collect_if_necessary_or_defer(&mut self) {
         if self.defers.load(atomic::Ordering::Relaxed) > 0 {
@@ -174,7 +177,7 @@ impl Heap {
             }
         }
     }
-    /// Allocate weak reference for specified GC pointer. 
+    /// Allocate weak reference for specified GC pointer.
     pub unsafe fn allocate_weak(&mut self, target: UntypedGcRef) -> WeakGcRef {
         let ptr = self.allocate_raw_or_fail(
             size_of::<WeakSlot>() + size_of::<HeapObjectHeader>(),
@@ -189,11 +192,11 @@ impl Heap {
         }
     }
     /// Allocate "raw" memory. This memory is not initialized at all (except header part of UntypedGcRef).
-    /// - `size` should include size for object you're allocating and additional bytes for [HeapObjectHeader]. If it is 
-    /// embedded in your struct as first field you do not have to include that. 
+    /// - `size` should include size for object you're allocating and additional bytes for [HeapObjectHeader]. If it is
+    /// embedded in your struct as first field you do not have to include that.
     /// - `index` should be an index obtained by calling `T::index()` on type that implements [GCInfoTrait](crate::internal::gc_info::GCInfoTrait)
-    /// 
-    /// This function returns none if allocation is failed. 
+    ///
+    /// This function returns none if allocation is failed.
     pub unsafe fn allocate_raw(&mut self, size: usize, index: GCInfoIndex) -> Option<UntypedGcRef> {
         let size = round_up(size, 8);
         let cell = if size >= LARGE_CUTOFF {
@@ -231,7 +234,6 @@ impl Heap {
             }
         })
     }
-
 
     #[cold]
     unsafe fn try_perform_collection_and_allocate_again(
@@ -338,6 +340,7 @@ impl Heap {
             current_heap_size,
             self.max_heap_size as f64 / 1024.
         );
+        self.total_gc_count += 1;
     }
     pub(crate) fn test_and_set_marked(&self, hdr: *const HeapObjectHeader) -> bool {
         unsafe {
@@ -372,7 +375,6 @@ impl Heap {
         }
     }
 }
-
 
 /// Defer point. GC cycle is deferred when instance of this struct is alive.
 pub struct DeferPoint {

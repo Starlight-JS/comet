@@ -1,6 +1,6 @@
 [package]
 name = "comet-gc"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2018"
 authors = ["Adel Prokurov <pr.adelprokurov@yandex.ru>"]
 repository = "https://github.com/Starlight-JS/comet"
