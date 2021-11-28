@@ -1,11 +1,7 @@
-
 #[cfg(windows)]
 pub mod _win {
-    use super::*;
 
     use core::{ptr::null_mut, usize};
-    use std::mem::size_of;
-    use crate::globals::IMMIX_BLOCK_SIZE;
     use winapi::um::{
         memoryapi::{VirtualAlloc, VirtualFree},
         winnt::{MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE},
@@ -37,9 +33,9 @@ pub mod _win {
                 }
             }
         }
-        /// Return a `BLOCK_SIZE` aligned pointer to the mmap'ed region.
-        pub fn aligned(&self) -> *mut u8 {
-            let offset = IMMIX_BLOCK_SIZE - (self.start as usize) % IMMIX_BLOCK_SIZE;
+        /// Return aligned pointer
+        pub fn aligned(&self, align: usize) -> *mut u8 {
+            let offset = align - (self.start as usize) % align;
             unsafe { self.start.add(offset) as *mut u8 }
         }
 
@@ -50,7 +46,14 @@ pub mod _win {
             self.end
         }
 
-        pub fn dontneed(&self, page: *mut u8, size: usize) {
+        pub fn dontneed(&self, _page: *mut u8, _size: usize) {
+            /*unsafe {
+                //DiscardVirtualMemory(page.cast(), size as _);
+                //VirtualFree(page.cast(), size, MEM_DECOMMIT);
+            }*/
+        }
+
+        pub fn decommit(&self, page: *mut u8, size: usize) {
             unsafe {
                 //DiscardVirtualMemory(page.cast(), size as _);
                 VirtualFree(page.cast(), size, MEM_DECOMMIT);
@@ -80,8 +83,6 @@ pub mod _win {
 pub mod _unix {
 
     use std::ptr::null_mut;
-
-    use crate::globals::IMMIX_BLOCK_SIZE;
 
     pub struct Mmap {
         start: *mut u8,
@@ -121,9 +122,9 @@ pub mod _unix {
                 }
             }
         }
-        /// Return a `BLOCK_SIZE` aligned pointer to the mmap'ed region.
-        pub fn aligned(&self) -> *mut u8 {
-            let offset = IMMIX_BLOCK_SIZE - (self.start as usize) % IMMIX_BLOCK_SIZE;
+        /// Return aligned pointer
+        pub fn aligned(&self, align: usize) -> *mut u8 {
+            let offset = align - (self.start as usize) % align;
             unsafe { self.start.add(offset) as *mut u8 }
         }
 
@@ -135,6 +136,12 @@ pub mod _unix {
         }
 
         pub fn dontneed(&self, page: *mut u8, size: usize) {
+            unsafe {
+                libc::madvise(page as *mut _, size as _, libc::MADV_DONTNEED);
+            }
+        }
+
+        pub fn decommit(&self, page: *mut u8, size: usize) {
             unsafe {
                 libc::madvise(page as *mut _, size as _, libc::MADV_DONTNEED);
             }
@@ -164,3 +171,14 @@ pub mod _unix {
 pub use _unix::*;
 #[cfg(windows)]
 pub use _win::*;
+
+impl Mmap {
+    pub fn dontneed_and_zero(&self, page: *mut u8, size: usize) {
+        if !cfg!(linux) {
+            unsafe {
+                core::ptr::write_bytes(page, 0, size);
+            }
+        }
+        self.dontneed(page, size);
+    }
+}

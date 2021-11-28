@@ -1,11 +1,11 @@
+use crate::api::HeapObjectHeader;
+use crate::api::MIN_ALLOCATION;
+use crate::util::mmap::Mmap;
 use atomic::Atomic;
 use atomic::Ordering;
 use core::fmt;
-#[cfg(not(target_arch = "wasm32"))]
-use memmap2::MmapMut;
 use std::mem::size_of;
-
-use crate::header::HeapObjectHeader;
+use std::ptr::null_mut;
 
 pub const fn round_down(x: u64, n: u64) -> u64 {
     x & !n
@@ -17,10 +17,7 @@ pub const fn round_up(x: u64, n: u64) -> u64 {
 
 #[allow(dead_code)]
 pub struct SpaceBitmap<const ALIGN: usize> {
-    #[cfg(not(target_arch = "wasm32"))]
-    mem_map: MmapMut,
-    #[cfg(target_arch = "wasm32")]
-    mem: *mut u8,
+    mem_map: Mmap,
     bitmap_begin: *mut Atomic<usize>,
     bitmap_size: usize,
     heap_begin: usize,
@@ -29,6 +26,23 @@ pub struct SpaceBitmap<const ALIGN: usize> {
 }
 const BITS_PER_INTPTR: usize = size_of::<usize>() * 8;
 impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
+    pub fn is_null(&self) -> bool {
+        self.bitmap_begin.is_null()
+    }
+    pub fn clear_all(&mut self) {
+        self.mem_map
+            .dontneed_and_zero(self.mem_map.start(), self.mem_map.size());
+    }
+    pub fn empty() -> Self {
+        Self {
+            mem_map: Mmap::uninit(),
+            bitmap_begin: null_mut(),
+            bitmap_size: 0,
+            heap_begin: 0,
+            heap_limit: 0,
+            name: "",
+        }
+    }
     #[inline]
     pub fn get_name(&self) -> &'static str {
         self.name
@@ -126,6 +140,7 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
         unsafe {
             let offset = addr.wrapping_sub(self.heap_begin);
             let index = Self::offset_to_index(offset);
+
             ((*self.bitmap_begin.add(index)).load(Ordering::Relaxed) & Self::offset_to_mask(offset))
                 != 0
         }
@@ -299,7 +314,7 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         name: &'static str,
-        mem_map: MmapMut,
+        mem_map: Mmap,
         bitmap_begin: *mut usize,
         bitmap_size: usize,
         heap_begin: *mut u8,
@@ -318,12 +333,16 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn create_from_memmap(
         name: &'static str,
-        mem_map: MmapMut,
+        mem_map: Mmap,
         heap_begin: *mut u8,
         heap_capacity: usize,
     ) -> Self {
-        let bitmap_begin = mem_map.as_ptr() as *mut u8;
+        let bitmap_begin = mem_map.start() as *mut u8;
         let bitmap_size = Self::compute_bitmap_size(heap_capacity as _);
+        mem_map.commit(bitmap_begin, mem_map.size());
+        unsafe {
+            core::ptr::write_bytes(bitmap_begin, 0, bitmap_size);
+        }
         Self {
             name,
             mem_map,
@@ -337,7 +356,8 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
     pub fn create(name: &'static str, heap_begin: *mut u8, heap_capacity: usize) -> Self {
         let bitmap_size = Self::compute_bitmap_size(heap_capacity as _);
 
-        let mem_map = MmapMut::map_anon(bitmap_size).unwrap();
+        let mem_map = Mmap::new(bitmap_size);
+
         Self::create_from_memmap(name, mem_map, heap_begin, heap_capacity)
     }
 
@@ -365,6 +385,69 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
             heap_limit: heap_begin as usize + heap_capacity,
         }
     }
+
+    pub fn sweep_walk(
+        live_bitmap: &SpaceBitmap<{ ALIGN }>,
+        mark_bitmap: &SpaceBitmap<{ ALIGN }>,
+        sweep_begin: usize,
+        sweep_end: usize,
+        mut callback: impl FnMut(usize, *mut *mut HeapObjectHeader),
+    ) {
+        if sweep_end <= sweep_begin {
+            return;
+        }
+
+        let buffer_size = size_of::<usize>() * BITS_PER_INTPTR;
+
+        let live = live_bitmap.bitmap_begin;
+        let mark = mark_bitmap.bitmap_begin;
+        unsafe {
+            let start = Self::offset_to_index(sweep_begin - live_bitmap.heap_begin as usize);
+            let end = Self::offset_to_index(sweep_end - live_bitmap.heap_begin as usize - 1);
+
+            let mut pointer_buf = vec![null_mut::<HeapObjectHeader>(); buffer_size];
+            let mut cur_pointer = &mut pointer_buf[0] as *mut *mut HeapObjectHeader;
+            let pointer_end = cur_pointer.add(buffer_size - BITS_PER_INTPTR);
+            for i in start..=end {
+                let mut garbage = (*live.add(i)).load(Ordering::Relaxed)
+                    & !(*mark.add(i)).load(Ordering::Relaxed);
+                if garbage != 0 {
+                    let ptr_base =
+                        Self::index_to_offset(i as _) as usize + live_bitmap.heap_begin as usize;
+                    while {
+                        let shift = garbage.trailing_zeros() as usize;
+                        garbage ^= 1 << shift;
+                        cur_pointer.write((ptr_base + shift * ALIGN) as _);
+                        cur_pointer = cur_pointer.add(1);
+                        garbage != 0
+                    } {}
+
+                    if cur_pointer >= pointer_end {
+                        callback(
+                            cur_pointer as usize
+                                - &pointer_buf[0] as *const *mut HeapObjectHeader as usize,
+                            &mut pointer_buf[0],
+                        );
+                        cur_pointer = &mut pointer_buf[0];
+                    }
+                }
+            }
+
+            if cur_pointer > &mut pointer_buf[0] as *mut *mut HeapObjectHeader {
+                callback(
+                    cur_pointer as usize - &pointer_buf[0] as *const *mut HeapObjectHeader as usize,
+                    &mut pointer_buf[0],
+                );
+            }
+        }
+    }
+
+    pub fn copy_view(&mut self, other: &Self) {
+        self.bitmap_begin = other.bitmap_begin;
+        self.bitmap_size = other.bitmap_size;
+        self.heap_begin = other.heap_begin;
+        self.heap_limit = other.heap_limit;
+    }
 }
 
 impl<const ALIGN: usize> fmt::Debug for SpaceBitmap<ALIGN> {
@@ -374,5 +457,81 @@ impl<const ALIGN: usize> fmt::Debug for SpaceBitmap<ALIGN> {
             "[begin={:p},end={:p}]",
             self.heap_begin as *const (), self.heap_limit as *const ()
         )
+    }
+}
+
+pub struct HeapBitmap {
+    continuous_space_bitmaps: Vec<*const SpaceBitmap<{ MIN_ALLOCATION }>>,
+}
+
+// TODO: PreciseAllocation
+impl HeapBitmap {
+    pub fn new() -> Self {
+        Self {
+            continuous_space_bitmaps: vec![],
+        }
+    }
+    pub fn get_continuous_space_bitmap(
+        &self,
+        obj: *const HeapObjectHeader,
+    ) -> Option<&SpaceBitmap<{ MIN_ALLOCATION }>> {
+        for bitmap in self.continuous_space_bitmaps.iter() {
+            unsafe {
+                if (**bitmap).has_address(obj.cast()) {
+                    return Some(&**bitmap);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn test(&self, obj: *const HeapObjectHeader) -> bool {
+        let bitmap = self.get_continuous_space_bitmap(obj);
+        if let Some(bitmap) = bitmap {
+            return bitmap.test(obj.cast());
+        }
+        unsafe {
+            debug_assert!((*obj).is_precise());
+        }
+        false
+    }
+
+    pub fn set(&self, obj: *const HeapObjectHeader) -> bool {
+        let bitmap = self.get_continuous_space_bitmap(obj);
+        if let Some(bitmap) = bitmap {
+            return bitmap.set(obj.cast());
+        }
+        unsafe {
+            debug_assert!((*obj).is_precise());
+        }
+        false
+    }
+
+    pub fn atomic_test_and_set(&self, obj: *const HeapObjectHeader) -> bool {
+        let bitmap = self.get_continuous_space_bitmap(obj);
+        if let Some(bitmap) = bitmap {
+            return bitmap.atomic_test_and_set(obj.cast());
+        }
+
+        unsafe {
+            debug_assert!((*obj).is_precise());
+        }
+        false
+    }
+
+    pub fn clear(&self, obj: *const HeapObjectHeader) -> bool {
+        let bitmap = self.get_continuous_space_bitmap(obj);
+        if let Some(bitmap) = bitmap {
+            return bitmap.clear(obj.cast());
+        }
+
+        unsafe {
+            debug_assert!((*obj).is_precise());
+        }
+        false
+    }
+
+    pub fn add_continuous_space(&mut self, space: *const SpaceBitmap<{ MIN_ALLOCATION }>) {
+        self.continuous_space_bitmaps.push(space);
     }
 }
