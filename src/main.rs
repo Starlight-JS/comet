@@ -60,6 +60,6 @@ fn main() {
         "Allocated ~{:.2}mb in {}s, throughput=~{}Gbps",
         total as f64 / 1024.0 / 1024.0,
         end.as_secs(),
-        (total as f64 / 1024.0 / 1024.0) / end.as_secs() as f64
+        (total as f64 / 1024.0 / 1024.0 / 1024.0) / end.as_secs() as f64
     )
 }
