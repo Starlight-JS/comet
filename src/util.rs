@@ -32,24 +32,24 @@ pub struct VTableBitField;
 
 pub struct SizeBitField;
 
-pub struct FinalizeBitField;
+pub struct MarkedBitField;
 
 pub struct ForwardedBit;
 
-impl BitFieldTrait<61, 1> for ForwardedBit {
-    type Next = FinalizeBitField;
+impl BitFieldTrait<62, 1> for ForwardedBit {
+    type Next = MarkedBitField;
 }
 
 impl BitFieldTrait<0, 48> for VTableBitField {
     type Next = SizeBitField;
 }
 
-impl BitFieldTrait<48, 1> for FinalizeBitField {
-    type Next = FinalizeBitField;
+impl BitFieldTrait<48, 1> for MarkedBitField {
+    type Next = MarkedBitField;
 }
 
 impl BitFieldTrait<50, 12> for SizeBitField {
-    type Next = FinalizeBitField;
+    type Next = MarkedBitField;
 }
 
 pub mod mmap;

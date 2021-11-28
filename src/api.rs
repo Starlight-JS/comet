@@ -13,6 +13,7 @@ pub trait Trace {
 }
 
 pub trait Collectable: Trace + mopa::Any {
+    #[inline(always)]
     fn allocation_size(&self) -> usize {
         std::mem::size_of_val(self)
     }
@@ -26,7 +27,7 @@ pub struct HeapObjectHeader {
     pub type_id: TypeId,
 }
 
-pub const MIN_ALLOCATION: usize = 8;
+pub const MIN_ALLOCATION: usize = 16;
 
 impl HeapObjectHeader {
     #[inline(always)]
@@ -82,12 +83,12 @@ impl HeapObjectHeader {
         ((self as *const Self as usize) + size_of::<Self>()) as *const u8
     }
     #[inline(always)]
-    pub fn finalize_bit(&self) -> bool {
-        FinalizeBitField::decode(self.value) != 0
+    pub fn marked_bit(&self) -> bool {
+        MarkedBitField::decode(self.value) != 0
     }
     #[inline(always)]
-    pub fn set_finalize_bit(&mut self) {
-        self.value = FinalizeBitField::update(self.value, 1);
+    pub fn set_marked_bit(&mut self) {
+        self.value = MarkedBitField::update(self.value, 1);
     }
     #[inline(always)]
     pub fn type_id(&self) -> TypeId {

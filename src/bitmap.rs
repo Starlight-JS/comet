@@ -6,13 +6,15 @@ use atomic::Ordering;
 use core::fmt;
 use std::mem::size_of;
 use std::ptr::null_mut;
-
+#[inline(always)]
 pub const fn round_down(x: u64, n: u64) -> u64 {
     x & !n
 }
 
+#[inline(always)]
 pub const fn round_up(x: u64, n: u64) -> u64 {
-    round_down(x + n - 1, n)
+    round_down(x.wrapping_add(n).wrapping_sub(1), n)
+    //round_down(x + n - 1, n)
 }
 
 #[allow(dead_code)]
@@ -145,7 +147,7 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
                 != 0
         }
     }
-    #[inline]
+    #[inline(always)]
     pub fn modify<const SET_BIT: bool>(&self, obj: *const u8) -> bool {
         let addr = obj as usize;
         debug_assert!(
@@ -185,8 +187,53 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
     }
 
     #[inline(always)]
+    pub fn modify_sync<const SET_BIT: bool>(&self, obj: *const u8) -> bool {
+        let addr = obj as usize;
+        debug_assert!(
+            addr >= self.heap_begin,
+            "invalid address: {:x} ({:x} > {:x} is false)",
+            addr,
+            addr,
+            self.heap_begin
+        );
+        //debug_assert!(obj as usize % ALIGN == 0, "Unaligned address {:p}", obj);
+        debug_assert!(self.has_address(obj), "Invalid object address: {:p}", obj);
+        let offset = addr.wrapping_sub(self.heap_begin);
+        let index = Self::offset_to_index(offset);
+        let mask = Self::offset_to_mask(offset);
+        debug_assert!(
+            index < self.bitmap_size / size_of::<usize>(),
+            "bitmap size: {}",
+            self.bitmap_size
+        );
+        let atomic_entry = unsafe { &mut *self.bitmap_begin.add(index).cast::<usize>() };
+        let old_word = *atomic_entry;
+        if SET_BIT {
+            // Check the bit before setting the word incase we are trying to mark a read only bitmap
+            // like an image space bitmap. This bitmap is mapped as read only and will fault if we
+            // attempt to change any words. Since all of the objects are marked, this will never
+            // occur if we check before setting the bit. This also prevents dirty pages that would
+            // occur if the bitmap was read write and we did not check the bit.
+            if (old_word & mask) == 0 {
+                *atomic_entry = old_word | mask;
+                //atomic_entry.store(old_word | mask, Ordering::Relaxed);
+            }
+        } else {
+            *atomic_entry = old_word & !mask;
+            //atomic_entry.store(old_word & !mask, Ordering::Relaxed);
+        }
+
+        debug_assert_eq!(self.test(obj), SET_BIT);
+        (old_word & mask) != 0
+    }
+
+    #[inline(always)]
     pub fn set(&self, obj: *const u8) -> bool {
         self.modify::<true>(obj)
+    }
+    #[inline(always)]
+    pub fn set_sync(&self, obj: *const u8) -> bool {
+        self.modify_sync::<true>(obj)
     }
 
     #[inline(always)]

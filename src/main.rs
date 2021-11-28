@@ -36,7 +36,7 @@ impl Collectable for Node {}
     }
 }*/
 fn main() {
-    let mut heap = Heap::new(1 * 1024 * 1024);
+    let mut heap = Heap::new(2 * 1024 * 1024 * 1024);
     let stack = heap.shadow_stack();
     let start = std::time::Instant::now();
     letroot!(l = stack, heap.allocate_with_gc(Node::None));
@@ -57,7 +57,7 @@ fn main() {
 
     let total = 500_000_000 * 32usize;
     println!(
-        "Allocated ~{:.2}mb in {}s, throughput=~{}Gbps",
+        "Allocated ~{:.2}mb in {}s, throughput=~{:.2}Gbps",
         total as f64 / 1024.0 / 1024.0,
         end.as_secs(),
         (total as f64 / 1024.0 / 1024.0 / 1024.0) / end.as_secs() as f64

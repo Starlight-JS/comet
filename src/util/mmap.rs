@@ -176,7 +176,7 @@ impl Mmap {
     pub fn dontneed_and_zero(&self, page: *mut u8, size: usize) {
         if !cfg!(linux) {
             unsafe {
-                core::ptr::write_bytes(page, 0, size);
+                memx::memset(std::slice::from_raw_parts_mut(page, size), 0);
             }
         }
         self.dontneed(page, size);

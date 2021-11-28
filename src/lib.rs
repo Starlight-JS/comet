@@ -1,3 +1,4 @@
+#![feature(core_intrinsics)]
 #[macro_use]
 pub mod util;
 #[macro_use]
@@ -5,6 +6,7 @@ pub mod api;
 pub mod bitmap;
 use std::{
     any::TypeId,
+    intrinsics::{likely, unlikely},
     marker::PhantomData,
     mem::size_of,
     ptr::{null_mut, NonNull},
@@ -26,6 +28,8 @@ pub struct Heap {
     stack: ShadowStack,
     total_allocated: usize,
     cached_live_bitmap: *const SpaceBitmap<{ MIN_ALLOCATION }>,
+    cached_finalize_bitmap: *const SpaceBitmap<{ MIN_ALLOCATION }>,
+    cached_mark_stack: Vec<*mut HeapObjectHeader>,
 }
 
 impl Heap {
@@ -38,14 +42,17 @@ impl Heap {
 
         let mut this = Box::new(Self {
             cached_live_bitmap: null_mut() as *const _,
+            cached_finalize_bitmap: null_mut(),
             temp_space,
             bump_pointer_space,
             mark_bitmap,
             total_allocated: 0,
             stack: ShadowStack::new(),
+            cached_mark_stack: Vec::with_capacity(128),
         });
 
         this.cached_live_bitmap = this.bump_pointer_space.get_live_bitmap();
+        this.cached_finalize_bitmap = this.bump_pointer_space.get_finalize_bitmap();
         this.mark_bitmap
             .add_continuous_space(this.temp_space.get_mark_bitmap());
         this.mark_bitmap
@@ -56,18 +63,19 @@ impl Heap {
     pub fn swap_semispaces(&mut self) {
         std::mem::swap(&mut self.bump_pointer_space, &mut self.temp_space);
         self.cached_live_bitmap = self.bump_pointer_space.get_live_bitmap();
+        self.cached_finalize_bitmap = self.bump_pointer_space.get_finalize_bitmap();
     }
     pub fn total_allocated(&self) -> usize {
         self.total_allocated
     }
     #[inline(always)]
     pub fn try_allocate<T: Collectable + 'static>(&mut self, value: T) -> Result<Gc<T>, T> {
-        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
+        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 16);
         let ptr = self
             .bump_pointer_space
             .alloc_non_virtual_without_accounting(size);
 
-        if ptr.is_null() {
+        if unlikely(ptr.is_null()) {
             return Err(value);
         }
 
@@ -80,10 +88,10 @@ impl Heap {
             (*ptr).set_vtable(vtable_of::<T>());
             (*ptr).set_size(size);
             if std::mem::needs_drop::<T>() {
-                self.bump_pointer_space.get_finalize_bitmap().set(ptr as _);
+                (*self.cached_finalize_bitmap).set_sync(ptr as _);
             }
             ((*ptr).data() as *mut T).write(value);
-            (*self.cached_live_bitmap).set(ptr as _);
+            (*self.cached_live_bitmap).set_sync(ptr as _);
             Ok(Gc {
                 base: NonNull::new_unchecked(ptr),
                 marker: PhantomData,
@@ -96,13 +104,13 @@ impl Heap {
         &mut self,
         value: T,
     ) -> Gc<T> {
-        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
+        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 16);
 
         let ptr = self
             .bump_pointer_space
             .alloc_non_virtual_without_accounting(size);
 
-        if !ptr.is_null() {
+        if likely(!ptr.is_null()) {
             unsafe {
                 // self.total_allocated += size;
                 ptr.write(HeapObjectHeader {
@@ -112,7 +120,7 @@ impl Heap {
                 (*ptr).set_vtable(vtable_of::<T>());
                 (*ptr).set_size(size);
                 if std::mem::needs_drop::<T>() {
-                    self.bump_pointer_space.get_finalize_bitmap().set(ptr as _);
+                    (*self.cached_finalize_bitmap).set(ptr as _);
                 }
                 ((*ptr).data() as *mut T).write(value);
 
@@ -148,6 +156,7 @@ impl Heap {
 
     pub fn gc(&mut self, references: &mut [&mut dyn Trace]) {
         let mut semispace = SemiSpace {
+            mark_stack: std::mem::replace(&mut self.cached_mark_stack, vec![]),
             to_space_live_bitmap: null_mut(),
             mark_bitmap: null_mut(),
             to_space: &mut self.temp_space,
@@ -155,11 +164,13 @@ impl Heap {
             objects_moved: 0,
             bytes_moved: 0,
             saved_bytes: 0,
-            mark_stack: Vec::with_capacity(128),
+
             shadow_stack: &self.stack,
             heap: self as *mut Self,
         };
         semispace.run(references);
+        let stack = semispace.mark_stack;
+        self.cached_mark_stack = stack;
     }
 }
 
@@ -208,7 +219,7 @@ impl SemiSpace {
                 (*self.to_space_live_bitmap).set(forward_address as _);
             }
 
-            if forward_address.is_null() {
+            if unlikely(forward_address.is_null()) {
                 panic!("Out of memory in the to-space");
             }
             self.saved_bytes +=
@@ -224,12 +235,7 @@ impl SemiSpace {
         src: *const u8,
         size: usize,
     ) -> usize {
-        //if size <= 4096 {
         std::ptr::copy_nonoverlapping(src, dest, size);
-        for i in 0..size {
-            assert_eq!(src.add(i).read(), dest.add(i).read());
-        }
-        // }
 
         0
     }
@@ -248,7 +254,7 @@ impl SemiSpace {
             let obj = obj.as_ptr();
             if (*self.from_space).has_address(obj) {
                 let mut forward_address = self.get_forwarding_address_in_from_space(obj);
-                if forward_address.is_null() {
+                if unlikely(forward_address.is_null()) {
                     forward_address = self.mark_non_forwarded_object(root.as_ptr());
 
                     (*obj).set_forwarded(forward_address as _);

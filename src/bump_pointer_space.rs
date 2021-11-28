@@ -9,7 +9,7 @@ use crate::{
     api::HeapObjectHeader,
     bitmap::round_up,
     space::ContinuousMemMapAllocSpace,
-    util::{align_down, align_up, mmap::Mmap},
+    util::{align_down, mmap::Mmap},
 };
 
 pub struct BumpPointerSpace {
@@ -59,15 +59,13 @@ impl BumpPointerSpace {
             main_block_size: Cell::new(0),
         }
     }
-
+    #[inline(always)]
     pub unsafe fn alloc_thread_unsafe(
         &mut self,
-        mut num_bytes: usize,
+        num_bytes: usize,
         bytes_allocated: &mut usize,
         usable_size: &mut usize,
     ) -> *mut HeapObjectHeader {
-        num_bytes = align_down(num_bytes as _, 8) as _;
-
         let end = self.end.load(atomic::Ordering::Relaxed);
         if end as usize + num_bytes > self.growth_end as usize {
             return null_mut();
@@ -81,24 +79,15 @@ impl BumpPointerSpace {
     }
     /// Release the pages back to the operating system
     pub fn clear(&mut self) {
-        unsafe {
-            if !cfg!(linux) {
-                std::ptr::write_bytes(
-                    self.begin(),
-                    0,
-                    self.limit() as usize - self.begin() as usize,
-                );
-            }
-            self.get_mem_map()
-                .decommit(self.begin(), self.limit() as usize - self.begin() as usize);
-            self.set_end(self.begin());
-            self.growth_end = self.limit();
-            {
-                let block_lock = self.block_lock.lock();
-                self.num_blocks.set(0);
-                self.main_block_size.set(0);
-                drop(block_lock);
-            }
+        self.get_mem_map()
+            .decommit(self.begin(), self.limit() as usize - self.begin() as usize);
+        self.set_end(self.begin());
+        self.growth_end = self.limit();
+        {
+            let block_lock = self.block_lock.lock();
+            self.num_blocks.set(0);
+            self.main_block_size.set(0);
+            drop(block_lock);
         }
     }
 
@@ -124,12 +113,7 @@ impl BumpPointerSpace {
         storage
     }
     #[inline(always)]
-    pub fn alloc_non_virtual_without_accounting(
-        &self,
-        mut num_bytes: usize,
-    ) -> *mut HeapObjectHeader {
-        num_bytes = align_down(num_bytes, 8);
-
+    pub fn alloc_non_virtual_without_accounting(&self, num_bytes: usize) -> *mut HeapObjectHeader {
         let mut old_end;
         let mut new_end;
         while {
@@ -148,7 +132,7 @@ impl BumpPointerSpace {
                 .is_err()
         } {}
         debug_assert!(
-            is_aligned(old_end as usize, 8),
+            is_aligned(old_end as usize, 16),
             "unaligned pointer {:p} {}",
             old_end,
             num_bytes
@@ -199,8 +183,10 @@ pub fn align_i32(value: i32, align: i32) -> i32 {
 
 /// rounds the given value `val` up to the nearest multiple
 /// of `align`.
-pub fn align_usize(value: usize, align: usize) -> usize {
-    ((value + align - 1) / align) * align
+#[inline(always)]
+pub const fn align_usize(value: usize, align: usize) -> usize {
+    ((value.wrapping_add(align).wrapping_sub(1)).wrapping_div(align)).wrapping_mul(align)
+    //((value + align - 1) / align) * align
 }
 
 /// returns 'true' if th given `value` is already aligned
