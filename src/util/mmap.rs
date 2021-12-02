@@ -1,4 +1,4 @@
-#[cfg(windows)]
+#[cfg(all(not(miri), windows))]
 pub mod _win {
 
     use core::{ptr::null_mut, usize};
@@ -79,7 +79,7 @@ pub mod _win {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(miri)))]
 pub mod _unix {
 
     use std::ptr::null_mut;
@@ -167,18 +167,87 @@ pub mod _unix {
     }
 }
 
-#[cfg(unix)]
+#[cfg(miri)]
+pub mod _miri {
+    use std::{mem::size_of, ptr::null_mut};
+
+    pub struct Mmap {
+        vec: Vec<usize>,
+        start: *mut u8,
+        end: *mut u8,
+        size: usize,
+    }
+
+    impl Mmap {
+        pub const fn uninit() -> Self {
+            Self {
+                start: null_mut(),
+                end: null_mut(),
+                size: 0,
+                vec: Vec::new(),
+            }
+        }
+
+        pub fn new(size: usize) -> Self {
+            let mut mem = vec![0usize; size / size_of::<usize>() + 32];
+
+            let start = &mut mem[0] as *mut usize as *mut u8;
+            let end = unsafe { start.add(size) };
+            Self {
+                vec: mem,
+                start,
+                end,
+                size,
+            }
+        }
+
+        pub fn aligned(&self, align: usize) -> *mut u8 {
+            let offset = align - (self.start as usize) % align;
+            unsafe { self.start.add(offset) as *mut u8 }
+        }
+
+        pub const fn start(&self) -> *mut u8 {
+            self.start
+        }
+        pub const fn end(&self) -> *mut u8 {
+            self.end
+        }
+
+        pub const fn dontneed(&self, _page: *mut u8, _size: usize) {}
+
+        pub const fn decommit(&self, _page: *mut u8, _size: usize) {}
+
+        pub const fn commit(&self, _page: *mut u8, _size: usize) {}
+        pub const fn size(&self) -> usize {
+            self.size
+        }
+    }
+}
+
+#[cfg(all(not(miri), unix))]
 pub use _unix::*;
-#[cfg(windows)]
+#[cfg(all(not(miri), windows))]
 pub use _win::*;
 
 impl Mmap {
     pub fn dontneed_and_zero(&self, page: *mut u8, size: usize) {
-        if !cfg!(linux) {
+        #[cfg(not(miri))]
+        {
+            if !cfg!(linux) {
+                unsafe {
+                    memx::memset(std::slice::from_raw_parts_mut(page, size), 0);
+                }
+            }
+        }
+        #[cfg(miri)]
+        {
             unsafe {
-                memx::memset(std::slice::from_raw_parts_mut(page, size), 0);
+                std::ptr::write_bytes(page, 0, size);
             }
         }
         self.dontneed(page, size);
     }
 }
+
+#[cfg(miri)]
+pub use _miri::*;

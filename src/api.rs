@@ -1,18 +1,17 @@
 use std::{
-    any::TypeId,
     marker::PhantomData,
     mem::size_of,
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Index, IndexMut},
     ptr::{null_mut, NonNull},
 };
 
-use crate::util::*;
+use crate::{large_space::PreciseAllocation, small_type_id, util::*};
 use mopa::mopafy;
-pub trait Trace {
+pub unsafe trait Trace {
     fn trace(&mut self, _vis: &mut dyn Visitor) {}
 }
 
-pub trait Collectable: Trace + mopa::Any {
+pub trait Collectable: Trace + Finalize + mopa::Any {
     #[inline(always)]
     fn allocation_size(&self) -> usize {
         std::mem::size_of_val(self)
@@ -21,10 +20,18 @@ pub trait Collectable: Trace + mopa::Any {
 
 mopafy!(Collectable);
 
+pub unsafe trait Finalize {
+    unsafe fn finalize(&mut self) {
+        std::ptr::drop_in_place(self)
+    }
+}
+
 #[repr(C)]
 pub struct HeapObjectHeader {
     pub value: u64,
-    pub type_id: TypeId,
+
+    pub padding: u32,
+    pub type_id: u32,
 }
 
 pub const MIN_ALLOCATION: usize = 16;
@@ -84,14 +91,18 @@ impl HeapObjectHeader {
     }
     #[inline(always)]
     pub fn marked_bit(&self) -> bool {
-        MarkedBitField::decode(self.value) != 0
+        MarkBit::decode(self.padding as _) != 0
+    }
+
+    pub fn unmark(&mut self) {
+        self.padding = MarkBit::update(self.padding as _, 0) as _;
     }
     #[inline(always)]
     pub fn set_marked_bit(&mut self) {
-        self.value = MarkedBitField::update(self.value, 1);
+        self.padding = MarkedBitField::update(self.padding as _, 1) as _;
     }
     #[inline(always)]
-    pub fn type_id(&self) -> TypeId {
+    pub fn type_id(&self) -> u32 {
         self.type_id
     }
 }
@@ -125,7 +136,7 @@ impl<T: Collectable + ?Sized> Field<T> {
     }
 
     pub fn is<U: Collectable>(&self) -> bool {
-        unsafe { (*self.base.as_ptr()).type_id == TypeId::of::<U>() }
+        unsafe { (*self.base.as_ptr()).type_id == small_type_id::<U>() }
     }
 
     pub fn downcast<U: Collectable>(&self) -> Option<Gc<U>> {
@@ -172,12 +183,15 @@ impl<T: Collectable + Sized> DerefMut for Field<T> {
     }
 }
 
-impl<T: Collectable + ?Sized> Trace for Field<T> {
+unsafe impl<T: Collectable + ?Sized> Trace for Field<T> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         vis.mark_object(&mut self.base);
     }
 }
 
+unsafe impl<T: Collectable + ?Sized> Finalize for Field<T> {}
+unsafe impl<T: Collectable + ?Sized> Finalize for Gc<T> {}
+impl<T: Collectable + ?Sized> Collectable for Gc<T> {}
 pub(crate) fn vtable_of<T: Collectable>() -> usize {
     let x = null_mut::<T>();
     unsafe { std::mem::transmute::<_, mopa::TraitObject>(x as *mut dyn Collectable).vtable as _ }
@@ -203,8 +217,31 @@ impl<T: Collectable + ?Sized> Gc<T> {
         }
     }
 
+    /// Returns "fake" unprotected handle.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because GC might happen when this handle is still alive but not protected by GC.
+    ///
+    pub unsafe fn fake_handle(&self) -> Handle<'_, T> {
+        Handle { handle: self }
+    }
+    /// Returns "fake" unprotected handle.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because GC might happen when this handle is still alive but not protected by GC.
+    ///
+    pub unsafe fn fake_handle_mut(&mut self) -> HandleMut<'_, T> {
+        HandleMut { handle: self }
+    }
+    #[inline(always)]
     pub fn is<U: Collectable>(&self) -> bool {
-        unsafe { (*self.base.as_ptr()).type_id == TypeId::of::<U>() }
+        unsafe { (*self.base.as_ptr()).type_id == small_type_id::<U>() }
+    }
+
+    pub fn vtable(&self) -> usize {
+        unsafe { (*self.base.as_ptr()).vtable() }
     }
 
     pub fn downcast<U: Collectable>(&self) -> Option<Gc<U>> {
@@ -215,6 +252,17 @@ impl<T: Collectable + ?Sized> Gc<T> {
             })
         } else {
             None
+        }
+    }
+
+    pub fn allocation_size(&self) -> usize {
+        unsafe {
+            let base = &*self.base.as_ptr();
+            if base.is_precise() {
+                (*PreciseAllocation::from_cell(self.base.as_ptr() as *mut _)).cell_size()
+            } else {
+                base.size()
+            }
         }
     }
 }
@@ -370,7 +418,8 @@ impl<'a, T: Rootable> core::ops::DerefMut for Rooted<'a, '_, T> {
 macro_rules! impl_prim {
     ($($t: ty)*) => {
         $(
-            impl Trace for $t {}
+            unsafe impl Trace for $t {}
+            unsafe impl Finalize for $t {}
             impl Collectable for $t {}
         )*
     };
@@ -395,8 +444,38 @@ pub struct Handle<'a, T: Collectable + ?Sized> {
     handle: &'a Gc<T>,
 }
 
+impl<'a, T: Collectable + ?Sized> Handle<'a, T> {
+    /// Returns Gc<T>
+    pub fn gc(&self) -> Gc<T> {
+        *self.handle
+    }
+    #[inline]
+    pub fn downcast<U: Collectable + Sized>(self) -> Result<Handle<'a, U>, Self> {
+        if self.gc().is::<U>() {
+            Ok(Handle {
+                handle: unsafe { std::mem::transmute(self.handle) },
+            })
+        } else {
+            Err(self)
+        }
+    }
+    #[inline]
+    pub fn to_dyn(self) -> Handle<'a, dyn Collectable> {
+        unsafe {
+            Handle {
+                handle: std::mem::transmute(self.handle),
+            }
+        }
+    }
+    #[inline]
+    pub fn get_dyn(&self) -> &dyn Collectable {
+        unsafe { (*self.handle.base.as_ptr()).get_dyn() }
+    }
+}
+
 impl<'a, T: Collectable> Deref for Handle<'a, T> {
     type Target = T;
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         unsafe {
             let data = (*self.handle.base.as_ptr()).data().cast::<T>();
@@ -410,25 +489,47 @@ pub struct HandleMut<'a, T: Collectable + ?Sized> {
 }
 
 impl<'a, T: Collectable + ?Sized> HandleMut<'a, T> {
+    #[inline(always)]
     /// Assigns new GC pointer to this Handle.
     pub fn write(&mut self, val: Gc<T>) {
         *self.handle = val;
     }
-
+    #[inline(always)]
     /// Returns Gc<T>
     pub fn gc(&self) -> Gc<T> {
         *self.handle
     }
-}
-
-impl<'a, T: Collectable + ?Sized> Handle<'a, T> {
-    pub fn gc(&self) -> Gc<T> {
-        *self.handle
+    #[inline(always)]
+    pub fn downcast<U: Collectable + Sized>(self) -> Result<HandleMut<'a, U>, Self> {
+        if self.gc().is::<U>() {
+            Ok(HandleMut {
+                handle: unsafe { std::mem::transmute(self.handle) },
+            })
+        } else {
+            Err(self)
+        }
+    }
+    #[inline(always)]
+    pub fn to_dyn(self) -> HandleMut<'a, dyn Collectable> {
+        unsafe {
+            HandleMut {
+                handle: std::mem::transmute(self.handle),
+            }
+        }
+    }
+    #[inline(always)]
+    pub fn get_dyn(&self) -> &dyn Collectable {
+        unsafe { (*self.handle.base.as_ptr()).get_dyn() }
+    }
+    #[inline(always)]
+    pub fn get_dyn_mut(&mut self) -> &mut dyn Collectable {
+        unsafe { (*self.handle.base.as_ptr()).get_dyn() }
     }
 }
 
 impl<'a, T: Collectable> Deref for HandleMut<'a, T> {
     type Target = T;
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         unsafe {
             let data = (*self.handle.base.as_ptr()).data().cast::<T>();
@@ -437,6 +538,7 @@ impl<'a, T: Collectable> Deref for HandleMut<'a, T> {
     }
 }
 impl<'a, T: Collectable> DerefMut for HandleMut<'a, T> {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
             let data = (*self.handle.base.as_ptr()).data().cast::<T>() as *mut T;
@@ -446,10 +548,13 @@ impl<'a, T: Collectable> DerefMut for HandleMut<'a, T> {
 }
 
 impl<'a, 'b, T: Collectable + ?Sized> Rooted<'a, 'b, Gc<T>> {
-    pub fn handle(&self) -> Handle<'_, T> {
-        Handle { handle: &**self }
+    #[inline(always)]
+    pub fn handle(&mut self) -> Handle<'_, T> {
+        Handle {
+            handle: &mut **self,
+        }
     }
-
+    #[inline(always)]
     pub fn handle_mut(&mut self) -> HandleMut<'_, T> {
         HandleMut {
             handle: &mut **self,
@@ -457,7 +562,7 @@ impl<'a, 'b, T: Collectable + ?Sized> Rooted<'a, 'b, Gc<T>> {
     }
 }
 
-impl<T: Collectable + ?Sized> Trace for Gc<T> {
+unsafe impl<T: Collectable + ?Sized> Trace for Gc<T> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         vis.mark_object(&mut self.base);
     }
@@ -555,5 +660,51 @@ pub trait Visitor {
 impl<T: Collectable + ?Sized> std::fmt::Pointer for Gc<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:p}", self.base)
+    }
+}
+
+pub trait GcIndex<'a, IDX> {
+    type Output: 'a;
+    fn at(&self, index: IDX) -> &'a Self::Output;
+}
+
+pub trait GcIndexMut<'a, IDX>: GcIndex<'a, IDX> {
+    fn at_mut(&mut self, index: IDX) -> &'a mut Self::Output;
+}
+
+impl<'a, I, T: Collectable + GcIndex<'a, I>> Index<I> for Handle<'a, T> {
+    type Output = <T as GcIndex<'a, I>>::Output;
+    fn index(&self, index: I) -> &Self::Output {
+        self.at(index)
+    }
+}
+
+impl<'a, I, T: Collectable + GcIndex<'a, I>> Index<I> for HandleMut<'a, T> {
+    type Output = <T as GcIndex<'a, I>>::Output;
+    fn index(&self, index: I) -> &Self::Output {
+        self.at(index)
+    }
+}
+
+impl<'a, I, T: Collectable + GcIndexMut<'a, I> + GcIndex<'a, I>> IndexMut<I> for HandleMut<'a, T> {
+    fn index_mut(&mut self, index: I) -> &'a mut Self::Output {
+        self.at_mut(index)
+    }
+}
+
+unsafe impl Trace for &mut [&mut dyn Trace] {
+    fn trace(&mut self, _vis: &mut dyn Visitor) {
+        for x in self.iter_mut() {
+            x.trace(_vis);
+        }
+    }
+}
+
+unsafe impl<T: Trace> Trace for Option<T> {
+    fn trace(&mut self, _vis: &mut dyn Visitor) {
+        match self {
+            Some(val) => val.trace(_vis),
+            _ => (),
+        }
     }
 }

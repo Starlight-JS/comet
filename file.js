@@ -1,8 +1,12 @@
 let start = new Date();
 let l = []
 let i = 0;
+let registry = new FinalizationRegistry(heldValue => {
+
+});
 while (i < 500000000) {
     l = [42, l];
+    registry.register(l, "hello")
     if (i % 8192 == 0) {
         l = [];
     }

@@ -1,21 +1,17 @@
 [package]
-name = "semispace"
-version = "0.1.0"
+name = "comet"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 mopa = "0.2"
-memmap2 = "0.5"
 libc = "0.2.98"
 atomic = "0.5"
-crossbeam-utils = "0.8"
-paste = "1.0"
+im = "15.0"
+libmimalloc-sys = { features = ["extended"], version = "0.1" }
 memx = "0.1"
-gc-shadowstack = "1.1"
-parking_lot = "0.11"
-backtrace = "0.3"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = [
     "memoryapi",

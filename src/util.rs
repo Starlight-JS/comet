@@ -53,3 +53,9 @@ impl BitFieldTrait<50, 12> for SizeBitField {
 }
 
 pub mod mmap;
+
+pub struct MarkBit;
+
+impl BitFieldTrait<0, 1> for MarkBit {
+    type Next = Self;
+}

@@ -6,24 +6,22 @@ use std::{
 };
 
 use crate::{
-    api::HeapObjectHeader,
-    bitmap::round_up,
-    space::ContinuousMemMapAllocSpace,
-    util::{align_down, mmap::Mmap},
+    api::HeapObjectHeader, bitmap::round_up, space::ContinuousMemMapAllocSpace, util::mmap::Mmap,
 };
 
+#[repr(C)]
 pub struct BumpPointerSpace {
     space: ContinuousMemMapAllocSpace,
 
     growth_end: *mut u8,
-    block_lock: parking_lot::Mutex<()>,
+
     main_block_size: Cell<usize>,
     num_blocks: Cell<usize>,
 }
 
 impl BumpPointerSpace {
     pub fn contains(&self, obj: *const u8) -> bool {
-        obj >= self.begin() && obj < self.end()
+        obj >= self.begin() && obj < self.limit()
     }
 
     pub fn can_move_objects(&self) -> bool {
@@ -54,7 +52,6 @@ impl BumpPointerSpace {
         Self {
             space: ContinuousMemMapAllocSpace::new(_name, mem_map, begin, begin, end),
             growth_end: end,
-            block_lock: parking_lot::Mutex::new(()),
             num_blocks: Cell::new(0),
             main_block_size: Cell::new(0),
         }
@@ -84,10 +81,8 @@ impl BumpPointerSpace {
         self.set_end(self.begin());
         self.growth_end = self.limit();
         {
-            let block_lock = self.block_lock.lock();
             self.num_blocks.set(0);
             self.main_block_size.set(0);
-            drop(block_lock);
         }
     }
 
@@ -150,12 +145,14 @@ struct BlockHeader {
 }
 impl Deref for BumpPointerSpace {
     type Target = ContinuousMemMapAllocSpace;
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.space
     }
 }
 
 impl DerefMut for BumpPointerSpace {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.space
     }
