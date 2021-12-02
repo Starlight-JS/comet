@@ -18,6 +18,9 @@ pub mod page;
 pub mod semispace;
 pub mod space;
 
+#[cfg(test)]
+pub mod tests;
+
 pub type Heap = semispace::SemiSpace;
 
 pub fn alloc_i32(heap: &mut impl base::GcBase, x: i32) -> Gc<i32> {

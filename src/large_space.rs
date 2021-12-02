@@ -203,7 +203,7 @@ impl LargeObjectSpace {
     pub fn is_young(&self, object: *const HeapObjectHeader) -> bool {
         unsafe {
             let cell = PreciseAllocation::from_cell(object as *mut _);
-            (*cell).is_marked()
+            !(*cell).is_marked()
         }
     }
     pub(crate) fn new() -> Self {
@@ -316,7 +316,7 @@ impl LargeObjectSpace {
                     (*allocation).index_in_space = dst_index as u32;
                     self.allocations[dst_index] = allocation;
                     dst_index += 1;
-                    (*allocation).clear_marked();
+                    // (*allocation).clear_marked();
                 }
             }
         }

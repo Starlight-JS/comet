@@ -159,6 +159,14 @@ impl Visitor for SemiSpace {
 }
 
 impl GcBase for SemiSpace {
+    fn register_finalizer<T: Collectable + ?Sized>(&mut self, object: Gc<T>) {
+        for obj in self.objects_with_finalizers.iter() {
+            if *obj == object.base.as_ptr() {
+                return;
+            }
+        }
+        self.objects_with_finalizers.push_back(object.base.as_ptr());
+    }
     fn collect(&mut self, references: &mut [&mut dyn Trace]) {
         unsafe {
             let to_mmap = self.to_space.get_mem_map();

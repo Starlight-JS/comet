@@ -66,7 +66,7 @@ impl HeapObjectHeader {
     }
     #[inline(always)]
     pub fn set_size(&mut self, size: usize) {
-        assert!(size != 0);
+        //assert!(size != 0);
         self.value = SizeBitField::update(self.value, size as u64 / MIN_ALLOCATION as u64);
     }
     #[inline(always)]

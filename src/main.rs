@@ -3,42 +3,59 @@ use comet::base::GcBase;
 use comet::letroot;
 use comet::minimark::MiniMarkGC;
 
-enum Node {
-    None,
-    Some { _value: i64, next: Field<Node> },
+struct Foo {
+    bar: Option<Field<Bar>>,
 }
 
-impl Collectable for Node {}
-unsafe impl Trace for Node {
+unsafe impl Trace for Foo {
     fn trace(&mut self, _vis: &mut dyn comet::api::Visitor) {
-        match self {
-            Self::Some { next, .. } => next.trace(_vis),
-            _ => (),
-        }
+        self.bar.trace(_vis);
     }
 }
 
-unsafe impl Finalize for Node {}
+unsafe impl Finalize for Foo {}
+impl Collectable for Foo {}
 
-fn main() {
-    let mut heap = MiniMarkGC::new(Some(256 * 1024 * 1024), None, None);
+pub struct Bar {
+    x: u32,
+}
 
-    let stack = heap.shadow_stack();
-    let start = std::time::Instant::now();
-    letroot!(l = stack, heap.allocate(Node::None));
-    let mut i = 0;
-    while i < 500_000_000 {
-        letroot!(tmp = stack, *l);
-        *l = heap.allocate(Node::Some {
-            _value: 0,
-            next: tmp.to_field(),
-        });
-        if i % 8129 == 0 {
-            *l = heap.allocate(Node::None);
-        }
-        i += 1;
+unsafe impl Trace for Bar {}
+unsafe impl Finalize for Bar {}
+impl Collectable for Bar {}
+
+pub struct LargeFoo {
+    bar: Option<Field<Bar>>,
+}
+
+unsafe impl Trace for LargeFoo {
+    fn trace(&mut self, _vis: &mut dyn comet::api::Visitor) {
+        self.bar.trace(_vis);
     }
+}
 
-    let end = start.elapsed();
-    println!("Complete in {}", end.as_millis());
+unsafe impl Finalize for LargeFoo {}
+impl Collectable for LargeFoo {
+    fn allocation_size(&self) -> usize {
+        128 * 1024
+    }
+}
+fn main() {
+    let mut minimark = MiniMarkGC::new(Some(1 * 1024), None, None);
+    let stack = minimark.shadow_stack();
+
+    letroot!(foo = stack, minimark.allocate(LargeFoo { bar: None }));
+    assert!(minimark.is_young(*foo));
+    minimark.minor_collection(&mut []);
+
+    assert!(!minimark.is_young(*foo));
+
+    let bar = minimark.allocate(Bar { x: 420 });
+    assert!(minimark.is_young(bar));
+    foo.handle_mut().bar = Some(bar.to_field());
+    minimark.write_barrier(*foo, bar);
+
+    minimark.minor_collection(&mut []);
+    assert_eq!(foo.handle().bar.as_ref().unwrap().x, 420);
+    assert!(!minimark.is_young(foo.handle().bar.as_ref().unwrap().to_gc()));
 }

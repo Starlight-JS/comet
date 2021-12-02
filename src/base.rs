@@ -61,4 +61,8 @@ pub trait GcBase {
     fn full_collection(&mut self, refs: &mut [&mut dyn Trace]) {
         self.collect(refs);
     }
+
+    /// Registers object as finalizable. This function should be used when you want to execute finalizer
+    /// even when `needs_drop::<T>()` returns false.
+    fn register_finalizer<T: Collectable + ?Sized>(&mut self, object: Gc<T>);
 }

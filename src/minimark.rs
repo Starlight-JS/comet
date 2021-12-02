@@ -1,4 +1,8 @@
-use std::{intrinsics::unlikely, mem::size_of, ptr::NonNull};
+use std::{
+    intrinsics::{likely, unlikely},
+    mem::size_of,
+    ptr::NonNull,
+};
 
 use crate::{
     api::{
@@ -35,6 +39,10 @@ pub struct MiniMarkGC {
 }
 
 impl MiniMarkGC {
+    pub fn is_young<T: Collectable + ?Sized>(&self, x: Gc<T>) -> bool {
+        !self.is_old(x.base.as_ptr())
+    }
+
     pub fn write_barrier<T: Collectable + ?Sized, U: Collectable + ?Sized>(
         &mut self,
         object: Gc<T>,
@@ -59,15 +67,16 @@ impl MiniMarkGC {
     }
 
     fn is_old(&self, obj: *const HeapObjectHeader) -> bool {
-        if self.nursery.contains(obj.cast()) {
-            return true;
-        }
         unsafe {
             if (*obj).is_precise() {
+                //assert!(false);
                 return (*PreciseAllocation::from_cell(obj as _)).is_marked();
             }
-            true
         }
+        if self.nursery.contains(obj.cast()) {
+            return false;
+        }
+        true
     }
 
     pub fn new(
@@ -220,6 +229,7 @@ impl MiniMarkGC {
 
             while let Some(object) = self.remembered.pop() {
                 (*object).unmark();
+
                 (*object).get_dyn().trace(&mut YoungTrace { gc: self });
             }
 
@@ -229,7 +239,8 @@ impl MiniMarkGC {
         }
         self.deal_with_finalizers(true);
         self.los.sweep();
-        self.nursery.clear();
+        let begin = self.nursery.begin();
+        self.nursery.set_end(begin);
         self.los.prepare_for_allocation(true);
     }
     fn major_collection_(&mut self, keep: &mut [&mut dyn Trace]) {
@@ -390,7 +401,11 @@ impl GcBase for MiniMarkGC {
             MIN_ALLOCATION,
         );
         unsafe {
-            let mut memory = self.nursery.alloc_thread_unsafe(size, &mut 0, &mut 0);
+            let mut memory = if likely(size <= 64 * 1024) {
+                self.nursery.alloc_thread_unsafe(size, &mut 0, &mut 0)
+            } else {
+                self.los.allocate(size)
+            };
             if unlikely(memory.is_null()) {
                 memory = self.collect_and_reserve(size, &mut [&mut value]);
             }
@@ -401,7 +416,11 @@ impl GcBase for MiniMarkGC {
                 padding: 0,
             });
             (*memory).set_vtable(vtable_of::<T>());
-            (*memory).set_size(size);
+            if size <= 64 * 1024 {
+                (*memory).set_size(size);
+            } else {
+                (*memory).set_size(0);
+            }
             ((*memory).data() as *mut T).write(value);
             if std::mem::needs_drop::<T>() {
                 self.objects_with_finalizers.push_back(memory);
@@ -433,7 +452,11 @@ impl GcBase for MiniMarkGC {
             MIN_ALLOCATION,
         );
         unsafe {
-            let memory = self.nursery.alloc_thread_unsafe(size, &mut 0, &mut 0);
+            let memory = if likely(size <= 64 * 1024) {
+                self.nursery.alloc_thread_unsafe(size, &mut 0, &mut 0)
+            } else {
+                self.los.allocate(size)
+            };
             if unlikely(memory.is_null()) {
                 return Err(value);
             }
@@ -444,7 +467,11 @@ impl GcBase for MiniMarkGC {
                 padding: 0,
             });
             (*memory).set_vtable(vtable_of::<T>());
-            (*memory).set_size(size);
+            if size <= 64 * 1024 {
+                (*memory).set_size(size);
+            } else {
+                (*memory).set_size(0);
+            }
             ((*memory).data() as *mut T).write(value);
             if std::mem::needs_drop::<T>() {
                 self.objects_with_finalizers.push_back(memory);
@@ -467,5 +494,14 @@ impl GcBase for MiniMarkGC {
     fn full_collection(&mut self, refs: &mut [&mut dyn Trace]) {
         self.minor_collection_(refs);
         self.major_collection_(refs);
+    }
+
+    fn register_finalizer<T: Collectable + ?Sized>(&mut self, object: Gc<T>) {
+        for obj in self.objects_with_finalizers.iter() {
+            if *obj == object.base.as_ptr() {
+                return;
+            }
+        }
+        self.objects_with_finalizers.push_back(object.base.as_ptr());
     }
 }
