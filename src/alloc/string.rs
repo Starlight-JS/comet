@@ -1,4 +1,5 @@
 //! Immutable GCed utf-8 string
+use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Deref;
 use std::{fmt, ops::Index};
@@ -9,17 +10,22 @@ use crate::{
 };
 
 #[repr(C)]
-pub struct GcStr {
+pub struct GcStr<H: GcBase = crate::Heap> {
     length: usize,
+    marker: PhantomData<H>,
     start: [u8; 0],
 }
 
-impl GcStr {
-    pub fn new(heap: &mut crate::Heap, from: impl AsRef<str>) -> Gc<Self> {
+impl<H: GcBase + 'static> GcStr<H> {
+    pub fn new(heap: &mut H, from: impl AsRef<str>) -> Gc<Self>
+    where
+        H: Unpin,
+    {
         let string_ = from.as_ref().as_bytes();
 
         heap.allocate_and_init(
             Self {
+                marker: PhantomData,
                 length: string_.len(),
                 start: [0; 0],
             },
@@ -28,10 +34,10 @@ impl GcStr {
             },
         )
     }
-    pub fn from_utf8(
-        heap: &mut crate::Heap,
-        bytes: &[u8],
-    ) -> Result<Gc<Self>, std::str::Utf8Error> {
+    pub fn from_utf8(heap: &mut H, bytes: &[u8]) -> Result<Gc<Self>, std::str::Utf8Error>
+    where
+        H: Unpin,
+    {
         let string = std::str::from_utf8(bytes)?;
         Ok(Self::new(heap, string))
     }
@@ -54,54 +60,52 @@ impl GcStr {
         self.as_ptr() as _
     }
 
-    pub fn replace(
-        &self,
-        heap: &mut crate::Heap,
-        from: impl AsRef<str>,
-        to: impl AsRef<str>,
-    ) -> Gc<GcStr> {
+    pub fn replace(&self, heap: &mut H, from: impl AsRef<str>, to: impl AsRef<str>) -> Gc<Self>
+    where
+        H: Unpin,
+    {
         let this = self.as_str();
         Self::new(heap, this.replace(from.as_ref(), to.as_ref()))
     }
 }
 
-impl fmt::Debug for GcStr {
+impl<H: GcBase + 'static> fmt::Debug for GcStr<H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.as_str())
     }
 }
 
-impl fmt::Display for GcStr {
+impl<H: GcBase + 'static> fmt::Display for GcStr<H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
     }
 }
 
-impl Index<usize> for GcStr {
+impl<H: GcBase + 'static> Index<usize> for GcStr<H> {
     type Output = u8;
     fn index(&self, index: usize) -> &Self::Output {
         &self.as_bytes()[index]
     }
 }
 
-impl AsRef<str> for GcStr {
+impl<H: GcBase + 'static> AsRef<str> for GcStr<H> {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
-impl Deref for GcStr {
+impl<H: GcBase + 'static> Deref for GcStr<H> {
     type Target = str;
     fn deref(&self) -> &Self::Target {
         self.as_str()
     }
 }
 
-impl Collectable for GcStr {
+impl<H: GcBase + 'static> Collectable for GcStr<H> {
     fn allocation_size(&self) -> usize {
         size_of::<Self>() + self.length
     }
 }
 
-unsafe impl Finalize for GcStr {}
-unsafe impl Trace for GcStr {}
+unsafe impl<H: GcBase + 'static> Finalize for GcStr<H> {}
+unsafe impl<H: GcBase + 'static> Trace for GcStr<H> {}
