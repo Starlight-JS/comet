@@ -1,6 +1,7 @@
 use comet::alloc::fixed_array::FixedArray;
 
 use comet::alloc::string::GcStr;
+use comet::alloc::vector::Vector;
 use comet::api::{Collectable, Field, Finalize, Gc, Trace};
 use comet::base::GcBase;
 use comet::letroot;
@@ -28,20 +29,16 @@ impl Collectable for Node {}
 fn main() {
     let mut heap = MiniMarkGC::new(Some(4 * 1024 * 1024), None, None);
     let stack = heap.shadow_stack();
-    let start = std::time::Instant::now();
-    letroot!(list = stack, heap.allocate(Node::None));
-    let mut i = 0;
-    while i < 500_000_000 {
-        *list = heap.allocate(Node::Some {
-            value: 42,
-            next: *list,
-        });
+    letroot!(
+        vec = stack,
+        Vector::<u8>::with_capacity(&mut *heap, 128 * 1024)
+    );
+    vec.push_back(&mut *heap, 42);
+    println!("{:p}", &vec[0]);
 
-        if i % 8192 == 0 {
-            *list = heap.allocate(Node::None);
-        }
-        i += 1;
-    }
-    println!("{:.2}", heap.old_space_allocated() as f64 / 1024.0 / 1024.0);
-    println!("Done {} {}ms", i, start.elapsed().as_millis());
+    heap.collect(&mut []);
+    letroot!(v2 = stack, *vec);
+    *vec = Vector::<u8>::with_capacity(&mut *heap, 42);
+    heap.full_collection(&mut []);
+    //println!("{:p}", &vec[0])
 }

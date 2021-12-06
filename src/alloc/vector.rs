@@ -1,4 +1,8 @@
-use std::{marker::PhantomData, mem::size_of};
+use std::{
+    marker::PhantomData,
+    mem::size_of,
+    ops::{Index, IndexMut},
+};
 
 use crate::{
     api::{Collectable, Finalize, Gc, Trace},
@@ -8,241 +12,144 @@ use crate::{
 /// Vector for heap allocated values.
 #[repr(C)]
 pub struct Vector<T: Collectable + Sized, H: GcBase = crate::Heap> {
-    marker: PhantomData<H>,
-    size: u32,
+    length: u32,
     capacity: u32,
+    marker: PhantomData<H>,
     data_start: [T; 0],
 }
 
-impl<T: Collectable + Sized, H: 'static + GcBase> Vector<T, H> {
-    #[inline]
-    pub fn new(heap: &mut H, capacity: usize) -> Gc<Self> {
-        let init = Self {
-            marker: PhantomData,
-            size: 0,
+impl<T: Collectable + Sized, H: GcBase + 'static> Vector<T, H> {
+    pub fn new(heap: &mut H) -> Gc<Self> {
+        Self::with_capacity(heap, 0)
+    }
+    pub fn with_capacity(heap: &mut H, capacity: usize) -> Gc<Self> {
+        let this = heap.allocate(Self {
+            length: 0,
             capacity: capacity as _,
+            marker: Default::default(),
             data_start: [],
-        };
-        heap.allocate(init)
+        });
+
+        this
     }
 
-    pub fn begin(&self) -> *const T {
+    pub fn data(&self) -> *const T {
         self.data_start.as_ptr()
     }
 
-    pub fn end(&self) -> *const T {
-        unsafe { self.data_start.as_ptr().add(self.size as _) }
-    }
-
-    pub fn begin_mut(&mut self) -> *mut T {
+    pub fn data_mut(&mut self) -> *mut T {
         self.data_start.as_mut_ptr()
     }
 
-    pub fn end_mut(&mut self) -> *mut T {
-        unsafe { self.data_start.as_mut_ptr().add(self.size as _) }
-    }
-
     pub fn len(&self) -> usize {
-        self.size as _
+        self.length as _
     }
 
     pub fn capacity(&self) -> usize {
         self.capacity as _
     }
-
-    pub fn get<'a>(&'a self, index: usize) -> Option<&'a T> {
-        if index >= self.size as usize {
-            None
-        } else {
-            Some(unsafe { &*self.begin().add(index) })
-        }
-    }
-
-    pub unsafe fn get_unchecked(&self, index: usize) -> &T {
-        self.get(index).unwrap_unchecked()
-    }
-
-    /// Get mutable reference to GCed pointer. When updating be sure to use write-barrier (when your GC is generational)
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        if index >= self.size as usize {
-            None
-        } else {
-            Some(unsafe { &mut *self.begin_mut().add(index) })
-        }
-    }
-
-    pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
-        self.get_mut(index).unwrap_unchecked()
-    }
 }
 
-impl<'a, T: Collectable + Sized, H: 'static + GcBase> Gc<Vector<T, H>> {
-    fn grow(&mut self, heap: &mut H, capacity: usize) {
-        let old_capacity = self.capacity();
-        let new_capacity = capacity;
-        if new_capacity == old_capacity {
-            return;
-        }
-
-        let len = self.len();
-        let mut new_vec = Vector::<T, H>::new(heap, new_capacity);
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.begin(), new_vec.begin_mut(), len);
-            new_vec.size = len as _;
-        }
-        *self = new_vec;
-    }
-
+impl<T: Collectable + Sized, H: GcBase + 'static> Gc<Vector<T, H>> {
     #[inline]
-    pub fn pop(&mut self) -> Option<T> {
-        let len = self.len();
-        if len == 0 {
-            return None;
+    pub fn push_back(&mut self, heap: &mut H, value: T) -> Self {
+        if self.length == self.capacity {
+            return self.push_back_slow(heap, value);
         }
-
         unsafe {
-            let v = self.begin().add(len - 1).read();
-            self.size -= 1;
-            Some(v)
+            self.data_mut().add(self.length as _).write(value);
+            self.length += 1;
+            *self
         }
-    }
-
-    #[inline]
-    pub fn push(&mut self, heap: &mut H, value: T) -> &mut T
-    where
-        T: Unpin,
-    {
-        let (len, cap) = (self.len(), self.capacity());
-        if len == cap {
-            return self.push_slow(heap, value);
-        }
-
-        let dst = unsafe { self.begin_mut().add(len) };
-        unsafe {
-            dst.write(value);
-        }
-        self.size += 1;
-        unsafe { &mut *dst }
     }
     #[cold]
-    fn push_slow(&mut self, heap: &mut H, value: T) -> &mut T
-    where
-        T: Unpin,
-    {
-        let stack = heap.shadow_stack();
-        letroot!(value = stack, Some(value));
-
-        self.grow(heap, next_capacity::<T>(self.capacity()));
-        let dst = unsafe { self.begin_mut().add(self.len()) };
+    fn push_back_slow(&mut self, heap: &mut H, value: T) -> Self {
+        // protect value so if value is Gc pointer then it is traced.
+        letroot!(value = heap.shadow_stack(), Some(value));
+        self.realloc(heap, 0);
         unsafe {
-            dst.write(value.take().unwrap_unchecked());
+            self.data_mut()
+                .add(self.length as _)
+                .write(value.take().unwrap());
+            self.length += 1;
+            *self
         }
-        self.size += 1;
-        unsafe { &mut *dst }
     }
-
-    pub fn remove(&mut self, index: usize) -> Option<T> {
-        let len = self.len();
-        if index >= len {
+    #[inline]
+    pub fn pop_back(&mut self) -> Option<T> {
+        if self.length == 0 {
             return None;
         }
-
         unsafe {
-            let p = self.begin_mut().add(index);
-            let x = p.read();
-            let src = p.add(1);
-            let dst = p;
-            let count = len - index - 1;
-            std::ptr::copy(src, dst, count);
-            self.size = len as u32 - 1;
-            Some(x)
+            self.length -= 1;
+            let value = self.data().add(self.length as _).read();
+            Some(value)
         }
     }
 
-    pub fn remove_item<V>(&mut self, item: &V) -> Option<T>
-    where
-        T: PartialEq<V>,
-    {
-        let len = self.len();
-        for i in 0..len {
+    // allocates new vector in GC heap. Updates `self` with new vector.
+    fn realloc(&mut self, heap: &mut H, size: usize) -> Self {
+        letroot!(this = heap.shadow_stack(), *self);
+        let capacity = next_capacity::<T>(this.capacity as _).max(size);
+        let mut new_self = heap.allocate(Vector::<T, H> {
+            length: 0,
+            capacity: capacity as _,
+            marker: Default::default(),
+            data_start: [],
+        });
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(this.data(), new_self.data_mut(), this.length as _);
+        }
+
+        new_self.length = self.length as _;
+        // set length to zero in case `needs_drop::<T>()` returns true and this vector will be finalized.
+        this.length = 0;
+        *self = new_self;
+        new_self
+    }
+}
+
+impl<T: Collectable + Sized, H: GcBase + 'static> Index<usize> for Vector<T, H> {
+    type Output = T;
+    fn index(&self, index: usize) -> &Self::Output {
+        assert!(
+            index < self.len(),
+            "Out of bounds {}, len {}",
+            index,
+            self.len()
+        );
+        unsafe { &*self.data().add(index) }
+    }
+}
+impl<T: Collectable + Sized, H: GcBase + 'static> IndexMut<usize> for Vector<T, H> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        assert!(
+            index < self.len(),
+            "Out of bounds {}, len {}",
+            index,
+            self.len()
+        );
+        unsafe { &mut *self.data_mut().add(index) }
+    }
+}
+unsafe impl<T: Collectable + Sized, H: GcBase + 'static> Trace for Vector<T, H> {
+    fn trace(&mut self, vis: &mut dyn crate::api::Visitor) {
+        for i in 0..self.length {
             unsafe {
-                if *self.get_unchecked(i) == *item {
-                    return self.remove(i);
-                }
-            }
-        }
-        None
-    }
-
-    pub fn reserve(&mut self, heap: &mut H, additional: usize) {
-        let capacity = self.capacity();
-        let total_required = self.len() + additional;
-
-        if total_required <= capacity {
-            return;
-        }
-
-        let mut new_capacity = next_capacity::<T>(capacity);
-        while new_capacity < total_required {
-            new_capacity = next_capacity::<T>(new_capacity);
-        }
-
-        self.grow(heap, new_capacity);
-    }
-
-    pub fn reserve_exact(&mut self, heap: &mut H, additional: usize) {
-        let capacity = self.capacity();
-        let len = self.len();
-
-        let total_required = len + additional;
-        if capacity >= total_required {
-            return;
-        }
-
-        self.grow(heap, total_required);
-    }
-
-    pub fn truncate(&mut self, len: usize) {
-        let self_len = self.len();
-
-        if len >= self_len {
-            return;
-        }
-
-        self.size = len as _;
-
-        if !core::mem::needs_drop::<T>() {
-            return;
-        }
-
-        let s =
-            unsafe { core::slice::from_raw_parts_mut(self.begin_mut().add(len), self_len - len) };
-
-        unsafe {
-            core::ptr::drop_in_place(s);
-        }
-    }
-}
-impl<T: Collectable + Sized, H: 'static + GcBase> Collectable for Vector<T, H> {
-    fn allocation_size(&self) -> usize {
-        size_of::<Self>() + (self.capacity as usize * size_of::<Gc<T>>())
-    }
-}
-
-unsafe impl<T: Collectable + Sized, H: 'static + GcBase> Trace for Vector<T, H> {
-    fn trace(&mut self, _vis: &mut dyn crate::api::Visitor) {
-        unsafe {
-            let mut cursor = self.begin_mut();
-            let end = self.end_mut();
-            while cursor < end {
-                (*cursor).trace(_vis);
-                cursor = cursor.add(1);
+                (*self.data_mut().add(i as _)).trace(vis);
             }
         }
     }
 }
 
 unsafe impl<T: Collectable + Sized, H: GcBase> Finalize for Vector<T, H> {}
+
+impl<T: Collectable + Sized, H: GcBase + 'static> Collectable for Vector<T, H> {
+    fn allocation_size(&self) -> usize {
+        self.capacity as usize * size_of::<T>() + size_of::<Self>()
+    }
+}
 
 const fn next_capacity<T>(capacity: usize) -> usize {
     let elem_size = core::mem::size_of::<T>();

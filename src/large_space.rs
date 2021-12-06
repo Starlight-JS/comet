@@ -301,6 +301,7 @@ impl LargeObjectSpace {
 
     pub fn sweep(&mut self) {
         let mut src_index = self.precise_allocations_offset_nursery_for_sweep;
+
         let mut dst_index = src_index;
         while src_index < self.allocations.len() {
             let allocation = self.allocations[src_index];
@@ -309,6 +310,9 @@ impl LargeObjectSpace {
                 (*allocation).sweep();
                 if (*allocation).is_empty() {
                     self.bytes -= (*allocation).cell_size();
+                    if super::minimark::VERBOSE {
+                        eprintln!("LargeObjectSpace: destroy {:p}", allocation);
+                    }
                     (*allocation).destroy();
 
                     continue;

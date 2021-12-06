@@ -13,6 +13,7 @@ use crate::{
     large_space::{LargeObjectSpace, PreciseAllocation},
 };
 
+pub const VERBOSE: bool = cfg!(feature = "minimark-verbose");
 /// Generational garbage collector. It handles the objects in 2 generations:
 ///
 /// - young objects: allocated in the nursery if they are not too large, or in LOS otherwise.
@@ -226,6 +227,12 @@ impl MiniMarkGC {
                 // we must mark precise allocation.
                 if (*obj).is_precise() && self.los.is_young(obj) {
                     (*PreciseAllocation::from_cell(obj)).test_and_set_marked();
+                    if VERBOSE {
+                        eprintln!(
+                            "MiniMark: minor: promote preice allocation at {:p} to old",
+                            obj
+                        );
+                    }
                     self.mark_stack.push(obj);
                 }
                 return;
@@ -243,10 +250,20 @@ impl MiniMarkGC {
             (*obj).set_forwarded(newobj as _);
             *root = NonNull::new_unchecked(newobj);
             self.mark_stack.push(newobj);
+            if VERBOSE {
+                eprintln!(
+                    "MiniMark: minor: promote young allocation at {:p} to {:p}",
+                    obj, newobj
+                );
+            }
         }
     }
 
     fn minor_collection_(&mut self, keep: &mut [&mut dyn Trace]) {
+        if VERBOSE {
+            eprintln!("MiniMark: Minor collection");
+        }
+        self.los.prepare_for_marking(true);
         self.los.begin_marking(false);
 
         for ref_ in keep {
@@ -273,12 +290,17 @@ impl MiniMarkGC {
         if !self.young_objects_with_finalizers.is_empty() {
             self.deal_with_young_objects_with_finalizers();
         }
-        self.los.sweep();
+
         let begin = self.nursery.begin();
         self.nursery.set_end(begin);
         self.los.prepare_for_allocation(true);
+        self.los.sweep();
     }
     fn major_collection_(&mut self, keep: &mut [&mut dyn Trace]) {
+        if VERBOSE {
+            eprintln!("MiniMark: Major collection");
+        }
+        self.los.prepare_for_marking(false);
         self.los.begin_marking(true);
 
         unsafe {
@@ -305,11 +327,12 @@ impl MiniMarkGC {
         if !self.objects_with_finalizers.is_empty() {
             self.deal_with_old_objects_with_finalizers();
         }
-        self.los.sweep();
+
         self.old_space.sweep();
         let total_memory_used = self.total_memory_used();
         self.set_major_threshold_from(total_memory_used as f64 * self.major_collection_threshold);
         self.los.prepare_for_allocation(false);
+        self.los.sweep();
     }
 
     fn malloc_out_of_nursery(&mut self, object: *mut HeapObjectHeader) -> *mut HeapObjectHeader {
@@ -399,6 +422,9 @@ impl OldSpace {
                     (*object).unmark();
                     old_space.allocated_bytes += block_size;
                 } else {
+                    if VERBOSE {
+                        eprintln!("Free old object {:p} {} bytes", block, block_size);
+                    }
                     libmimalloc_sys::mi_free(block);
                 }
 
