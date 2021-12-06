@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, mem::size_of};
 
 use crate::{
-    api::{Collectable, Finalize, Gc, Handle, HandleMut, Trace},
+    api::{Collectable, Finalize, Gc, Trace},
     base::GcBase,
 };
 
@@ -50,7 +50,7 @@ impl<T: Collectable + Sized, H: 'static + GcBase> Vector<T, H> {
         self.capacity as _
     }
 
-    pub fn get(&self, index: usize) -> Option<&T> {
+    pub fn get<'a>(&'a self, index: usize) -> Option<&'a T> {
         if index >= self.size as usize {
             None
         } else {
@@ -76,37 +76,7 @@ impl<T: Collectable + Sized, H: 'static + GcBase> Vector<T, H> {
     }
 }
 
-impl<T: Collectable + Sized, H: 'static + GcBase> Vector<Gc<T>, H> {
-    /// Returns immutable handle to the element at `index`.
-    ///
-    ///
-    ///  # Safety
-    /// Safe because to get access to Vector you have to have Vector rooted.
-    ///
-    pub fn at<'a>(&self, index: usize) -> Option<Handle<'a, T>> {
-        if index >= self.size as usize {
-            None
-        } else {
-            Some(unsafe { (*self.begin().add(index)).fake_handle() })
-        }
-    }
-}
-impl<'a, T: Collectable + ?Sized, H: 'static + GcBase> HandleMut<'a, Vector<Gc<T>, H>> {
-    /// Returns mutable handle to the element at `index`.
-    ///
-    /// # Safety
-    /// Safe because to get HandleMut you have to have Vector rooted.
-    ///
-    pub fn at_mut(&mut self, index: usize) -> Option<HandleMut<'a, T>> {
-        if index >= self.size as usize {
-            None
-        } else {
-            Some(unsafe { (*self.begin_mut().add(index)).fake_handle_mut() })
-        }
-    }
-}
-
-impl<'a, T: Collectable + Sized, H: 'static + GcBase> HandleMut<'a, Vector<T, H>> {
+impl<'a, T: Collectable + Sized, H: 'static + GcBase> Gc<Vector<T, H>> {
     fn grow(&mut self, heap: &mut H, capacity: usize) {
         let old_capacity = self.capacity();
         let new_capacity = capacity;
@@ -117,10 +87,10 @@ impl<'a, T: Collectable + Sized, H: 'static + GcBase> HandleMut<'a, Vector<T, H>
         let len = self.len();
         let mut new_vec = Vector::<T, H>::new(heap, new_capacity);
         unsafe {
-            std::ptr::copy_nonoverlapping(self.begin(), new_vec.fake_handle_mut().begin_mut(), len);
-            new_vec.fake_handle_mut().size = len as _;
+            std::ptr::copy_nonoverlapping(self.begin(), new_vec.begin_mut(), len);
+            new_vec.size = len as _;
         }
-        self.write(new_vec);
+        *self = new_vec;
     }
 
     #[inline]

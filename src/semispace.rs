@@ -269,4 +269,10 @@ impl GcBase for SemiSpace {
     fn shadow_stack<'a>(&self) -> &'a ShadowStack {
         unsafe { std::mem::transmute(&self.shadow_stack) }
     }
+    fn allocate_raw<T: Collectable>(
+        &mut self,
+        _size: usize,
+    ) -> Option<Gc<std::mem::MaybeUninit<T>>> {
+        todo!()
+    }
 }

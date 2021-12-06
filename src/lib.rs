@@ -17,11 +17,12 @@ pub mod miri_stack;
 pub mod page;
 pub mod semispace;
 pub mod space;
+pub mod stack;
 
 #[cfg(test)]
 pub mod tests;
 
-pub type Heap = semispace::SemiSpace;
+pub type Heap = minimark::MiniMarkGC;
 
 pub fn alloc_i32(heap: &mut impl base::GcBase, x: i32) -> Gc<i32> {
     heap.allocate(x)

@@ -1,11 +1,11 @@
 use crate::{
-    api::{Collectable, Field, Finalize, Trace},
+    api::{Collectable, Finalize, Gc, Trace},
     base::GcBase,
     minimark::MiniMarkGC,
 };
 
 struct Foo {
-    bar: Option<Field<Bar>>,
+    bar: Option<Gc<Bar>>,
 }
 
 unsafe impl Trace for Foo {
@@ -26,7 +26,7 @@ unsafe impl Finalize for Bar {}
 impl Collectable for Bar {}
 
 pub struct LargeFoo {
-    bar: Option<Field<Bar>>,
+    bar: Option<Gc<Bar>>,
 }
 
 unsafe impl Trace for LargeFoo {
@@ -56,7 +56,7 @@ impl Collectable for LargeBar {
 }
 
 pub struct LargeFoo2 {
-    bar: Option<Field<LargeBar>>,
+    bar: Option<Gc<LargeBar>>,
 }
 
 unsafe impl Trace for LargeFoo2 {
@@ -85,12 +85,12 @@ pub fn test_write_barrier() {
 
     let bar = minimark.allocate(Bar { x: 420 });
     assert!(minimark.is_young(bar));
-    foo.handle_mut().bar = Some(bar.to_field());
+    foo.bar = Some(bar);
     minimark.write_barrier(*foo, bar);
 
     minimark.minor_collection(&mut []);
-    assert_eq!(foo.handle().bar.as_ref().unwrap().x, 420);
-    assert!(!minimark.is_young(foo.handle().bar.as_ref().unwrap().to_gc()));
+    assert_eq!(foo.bar.as_ref().unwrap().x, 420);
+    assert!(!minimark.is_young(*foo.bar.as_ref().unwrap()));
 }
 
 #[test]
@@ -106,12 +106,12 @@ pub fn test_write_barrier_large() {
 
     let bar = minimark.allocate(Bar { x: 420 });
     assert!(minimark.is_young(bar));
-    foo.handle_mut().bar = Some(bar.to_field());
+    foo.bar = Some(bar);
     minimark.write_barrier(*foo, bar);
 
     minimark.minor_collection(&mut []);
-    assert_eq!(foo.handle().bar.as_ref().unwrap().x, 420);
-    assert!(!minimark.is_young(foo.handle().bar.as_ref().unwrap().to_gc()));
+    assert_eq!(foo.bar.as_ref().unwrap().x, 420);
+    assert!(!minimark.is_young(*foo.bar.as_ref().unwrap()));
 }
 
 #[test]
@@ -127,10 +127,10 @@ pub fn test_write_barrier_large_2() {
 
     let bar = minimark.allocate(LargeBar { x: 420 });
     assert!(minimark.is_young(bar));
-    foo.handle_mut().bar = Some(bar.to_field());
+    foo.bar = Some(bar);
     minimark.write_barrier(*foo, bar);
 
     minimark.minor_collection(&mut []);
-    assert_eq!(foo.handle().bar.as_ref().unwrap().x, 420);
-    assert!(!minimark.is_young(foo.handle().bar.as_ref().unwrap().to_gc()));
+    assert_eq!(foo.bar.as_ref().unwrap().x, 420);
+    assert!(!minimark.is_young(*foo.bar.as_ref().unwrap()));
 }

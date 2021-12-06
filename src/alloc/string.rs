@@ -29,7 +29,7 @@ impl<H: GcBase + 'static> GcStr<H> {
                 length: string_.len(),
                 start: [0; 0],
             },
-            |mut string| unsafe {
+            |string| unsafe {
                 std::ptr::copy_nonoverlapping(string_.as_ptr(), string.as_mut_ptr(), string.length);
             },
         )

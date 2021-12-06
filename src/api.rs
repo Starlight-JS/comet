@@ -1,7 +1,7 @@
 use std::{
     marker::PhantomData,
-    mem::size_of,
-    ops::{Deref, DerefMut, Index, IndexMut},
+    mem::{size_of, MaybeUninit},
+    ops::{Deref, DerefMut},
     ptr::{null_mut, NonNull},
 };
 
@@ -93,13 +93,13 @@ impl HeapObjectHeader {
     pub fn marked_bit(&self) -> bool {
         MarkBit::decode(self.padding as _) != 0
     }
-
+    #[inline(always)]
     pub fn unmark(&mut self) {
         self.padding = MarkBit::update(self.padding as _, 0) as _;
     }
     #[inline(always)]
     pub fn set_marked_bit(&mut self) {
-        self.padding = MarkedBitField::update(self.padding as _, 1) as _;
+        self.padding = MarkBit::update(self.padding as _, 1) as _;
     }
     #[inline(always)]
     pub fn type_id(&self) -> u32 {
@@ -110,15 +110,15 @@ impl HeapObjectHeader {
 /// A type that should be used to store GCed struct fields. It is not movable but dereferencable.
 #[repr(transparent)]
 pub struct Field<T: Collectable + ?Sized> {
-    base: NonNull<HeapObjectHeader>,
-    marker: PhantomData<T>,
+    base: Gc<T>,
 }
 impl<T: Collectable + ?Sized> Field<T> {
     pub fn as_dyn(&self) -> &dyn Collectable {
         unsafe {
+            let base = self.base.base.as_ptr();
             let trait_object = mopa::TraitObject {
-                data: (*self.base.as_ptr()).data() as *mut (),
-                vtable: (*self.base.as_ptr()).vtable() as *mut (),
+                data: (*base).data() as *mut (),
+                vtable: (*base).vtable() as *mut (),
             };
 
             std::mem::transmute(trait_object)
@@ -126,9 +126,10 @@ impl<T: Collectable + ?Sized> Field<T> {
     }
     pub fn as_dyn_mut(&mut self) -> &mut dyn Collectable {
         unsafe {
+            let base = self.base.base.as_ptr();
             let trait_object = mopa::TraitObject {
-                data: (*self.base.as_ptr()).data() as *mut (),
-                vtable: (*self.base.as_ptr()).vtable() as *mut (),
+                data: (*base).data() as *mut (),
+                vtable: (*base).vtable() as *mut (),
             };
 
             std::mem::transmute(trait_object)
@@ -136,39 +137,27 @@ impl<T: Collectable + ?Sized> Field<T> {
     }
 
     pub fn is<U: Collectable>(&self) -> bool {
-        unsafe { (*self.base.as_ptr()).type_id == small_type_id::<U>() }
+        self.base.is::<U>()
     }
 
     pub fn downcast<U: Collectable>(&self) -> Option<Gc<U>> {
-        if self.is::<U>() {
-            Some(Gc {
-                base: self.base,
-                marker: PhantomData,
-            })
-        } else {
-            None
-        }
+        self.base.downcast::<U>()
     }
 
     pub fn to_dyn(&self) -> Gc<dyn Collectable> {
-        Gc {
-            base: self.base,
-            marker: PhantomData,
-        }
+        self.base.to_dyn()
     }
 
     pub fn to_gc(&self) -> Gc<T> {
-        Gc {
-            base: self.base,
-            marker: PhantomData,
-        }
+        self.base
     }
 }
 impl<T: Collectable + Sized> Deref for Field<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe {
-            let data = (*self.base.as_ptr()).data().cast::<T>();
+            let base = self.base.base;
+            let data = (*base.as_ptr()).data().cast::<T>();
             &*data
         }
     }
@@ -177,7 +166,9 @@ impl<T: Collectable + Sized> Deref for Field<T> {
 impl<T: Collectable + Sized> DerefMut for Field<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
-            let data = (*self.base.as_ptr()).data().cast::<T>() as *mut T;
+            let base = self.base.base;
+            let data = (*base.as_ptr()).data().cast::<T>() as *mut T;
+
             &mut *data
         }
     }
@@ -185,7 +176,7 @@ impl<T: Collectable + Sized> DerefMut for Field<T> {
 
 unsafe impl<T: Collectable + ?Sized> Trace for Field<T> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
-        vis.mark_object(&mut self.base);
+        vis.mark_object(&mut self.base.base);
     }
 }
 
@@ -197,17 +188,26 @@ pub(crate) fn vtable_of<T: Collectable>() -> usize {
     unsafe { std::mem::transmute::<_, mopa::TraitObject>(x as *mut dyn Collectable).vtable as _ }
 }
 
+pub(crate) fn vtable_of_trace<T: Trace>() -> usize {
+    let x = null_mut::<T>();
+    unsafe { std::mem::transmute::<_, mopa::TraitObject>(x as *mut dyn Trace).vtable as _ }
+}
+
 pub struct Gc<T: Collectable + ?Sized> {
     pub(crate) base: NonNull<HeapObjectHeader>,
     pub(crate) marker: PhantomData<T>,
 }
-
+impl<T: Collectable + Sized> Gc<MaybeUninit<T>> {
+    pub unsafe fn assume_init(self) -> Gc<T> {
+        Gc {
+            base: self.base,
+            marker: Default::default(),
+        }
+    }
+}
 impl<T: Collectable + ?Sized> Gc<T> {
     pub fn to_field(self) -> Field<T> {
-        Field {
-            base: self.base,
-            marker: self.marker,
-        }
+        Field { base: self }
     }
 
     pub fn to_dyn(self) -> Gc<dyn Collectable> {
@@ -217,24 +217,6 @@ impl<T: Collectable + ?Sized> Gc<T> {
         }
     }
 
-    /// Returns "fake" unprotected handle.
-    ///
-    /// # Safety
-    ///
-    /// This function is unsafe because GC might happen when this handle is still alive but not protected by GC.
-    ///
-    pub unsafe fn fake_handle(&self) -> Handle<'_, T> {
-        Handle { handle: self }
-    }
-    /// Returns "fake" unprotected handle.
-    ///
-    /// # Safety
-    ///
-    /// This function is unsafe because GC might happen when this handle is still alive but not protected by GC.
-    ///
-    pub unsafe fn fake_handle_mut(&mut self) -> HandleMut<'_, T> {
-        HandleMut { handle: self }
-    }
     #[inline(always)]
     pub fn is<U: Collectable>(&self) -> bool {
         unsafe { (*self.base.as_ptr()).type_id == small_type_id::<U>() }
@@ -371,48 +353,30 @@ impl<T: Rootable> Drop for ShadowStackInternal<'_, T> {
     }
 }
 /// Rooted value on stack. This is non-copyable type that is used to hold GC thing on stack.
-pub struct Rooted<'a, 'b, T: Rootable> {
+pub struct Rooted<'a, T: Rootable> {
     #[doc(hidden)]
-    pinned: core::pin::Pin<&'a mut ShadowStackInternal<'b, T>>,
+    value: &'a mut T,
 }
-impl<'a, 'b, T: Rootable> Rooted<'a, 'b, T> {
+impl<'a, T: Rootable> Rooted<'a, T> {
     /// Create rooted value from pinned reference. Note that this function must be used only
     /// inside `$letroot` macro.
     ///
     /// # Safety
     ///
     ///  Very unsafe function and must not be used by users!
-    pub unsafe fn construct(pin: core::pin::Pin<&'a mut ShadowStackInternal<'b, T>>) -> Self {
-        Self { pinned: pin }
-    }
-    /// Get internal rooted handle
-    ///
-    /// # Safety
-    ///
-    /// Very unsafe and should be used only by Deref and DerefMut impls
-    pub unsafe fn get_internal(&self) -> &ShadowStackInternal<T> {
-        core::mem::transmute_copy::<_, _>(&self.pinned)
-    }
-    /// Get internal rooted handle
-    ///
-    /// # Safety
-    ///
-    /// Very unsafe and should be used only by Deref and DerefMut impls
-    pub unsafe fn get_internal_mut(&mut self) -> &mut &ShadowStackInternal<T> {
-        core::mem::transmute_copy::<_, _>(&self.pinned)
+    pub unsafe fn construct(ptr: &'a mut T) -> Self {
+        Self { value: ptr }
     }
 }
-impl<'a, T: Rootable> core::ops::Deref for Rooted<'a, '_, T> {
+impl<'a, T: Rootable> core::ops::Deref for Rooted<'a, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        &self.pinned.value
+        self.value
     }
 }
-impl<'a, T: Rootable> core::ops::DerefMut for Rooted<'a, '_, T> {
+impl<'a, T: Rootable> core::ops::DerefMut for Rooted<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            &mut core::mem::transmute_copy::<_, &mut ShadowStackInternal<T>>(&mut self.pinned).value
-        }
+        self.value
     }
 }
 macro_rules! impl_prim {
@@ -434,149 +398,15 @@ impl_prim!(
 );
 
 impl<T: Trace> Rootable for T {}
-impl<T: Rootable> std::fmt::Pointer for Rooted<'_, '_, T> {
+impl<T: Rootable> std::fmt::Pointer for Rooted<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:p}", self.pinned)
-    }
-}
-
-pub struct Handle<'a, T: Collectable + ?Sized> {
-    handle: &'a Gc<T>,
-}
-
-impl<'a, T: Collectable + ?Sized> Handle<'a, T> {
-    /// Returns Gc<T>
-    pub fn gc(&self) -> Gc<T> {
-        *self.handle
-    }
-    #[inline]
-    pub fn downcast<U: Collectable + Sized>(self) -> Result<Handle<'a, U>, Self> {
-        if self.gc().is::<U>() {
-            Ok(Handle {
-                handle: unsafe { std::mem::transmute(self.handle) },
-            })
-        } else {
-            Err(self)
-        }
-    }
-    #[inline]
-    pub fn to_dyn(self) -> Handle<'a, dyn Collectable> {
-        unsafe {
-            Handle {
-                handle: std::mem::transmute(self.handle),
-            }
-        }
-    }
-    #[inline]
-    pub fn get_dyn(&self) -> &dyn Collectable {
-        unsafe { (*self.handle.base.as_ptr()).get_dyn() }
-    }
-}
-
-impl<'a, T: Collectable> Deref for Handle<'a, T> {
-    type Target = T;
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        unsafe {
-            let data = (*self.handle.base.as_ptr()).data().cast::<T>();
-            &*data
-        }
-    }
-}
-
-pub struct HandleMut<'a, T: Collectable + ?Sized> {
-    handle: &'a mut Gc<T>,
-}
-
-impl<'a, T: Collectable + ?Sized> HandleMut<'a, T> {
-    #[inline(always)]
-    /// Assigns new GC pointer to this Handle.
-    pub fn write(&mut self, val: Gc<T>) {
-        *self.handle = val;
-    }
-    #[inline(always)]
-    /// Returns Gc<T>
-    pub fn gc(&self) -> Gc<T> {
-        *self.handle
-    }
-    #[inline(always)]
-    pub fn downcast<U: Collectable + Sized>(self) -> Result<HandleMut<'a, U>, Self> {
-        if self.gc().is::<U>() {
-            Ok(HandleMut {
-                handle: unsafe { std::mem::transmute(self.handle) },
-            })
-        } else {
-            Err(self)
-        }
-    }
-    #[inline(always)]
-    pub fn to_dyn(self) -> HandleMut<'a, dyn Collectable> {
-        unsafe {
-            HandleMut {
-                handle: std::mem::transmute(self.handle),
-            }
-        }
-    }
-    #[inline(always)]
-    pub fn get_dyn(&self) -> &dyn Collectable {
-        unsafe { (*self.handle.base.as_ptr()).get_dyn() }
-    }
-    #[inline(always)]
-    pub fn get_dyn_mut(&mut self) -> &mut dyn Collectable {
-        unsafe { (*self.handle.base.as_ptr()).get_dyn() }
-    }
-}
-
-impl<'a, T: Collectable> Deref for HandleMut<'a, T> {
-    type Target = T;
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        unsafe {
-            let data = (*self.handle.base.as_ptr()).data().cast::<T>();
-            &*data
-        }
-    }
-}
-impl<'a, T: Collectable> DerefMut for HandleMut<'a, T> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            let data = (*self.handle.base.as_ptr()).data().cast::<T>() as *mut T;
-            &mut *data
-        }
-    }
-}
-
-impl<'a, 'b, T: Collectable + ?Sized> Rooted<'a, 'b, Gc<T>> {
-    #[inline(always)]
-    pub fn handle(&mut self) -> Handle<'_, T> {
-        Handle {
-            handle: &mut **self,
-        }
-    }
-    #[inline(always)]
-    pub fn handle_mut(&mut self) -> HandleMut<'_, T> {
-        HandleMut {
-            handle: &mut **self,
-        }
+        write!(f, "{:p}", self.value)
     }
 }
 
 unsafe impl<T: Collectable + ?Sized> Trace for Gc<T> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         vis.mark_object(&mut self.base);
-    }
-}
-
-impl<T: Collectable + ?Sized> std::fmt::Pointer for Handle<'_, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Handle({:p}->{:p})", self.handle, *self.handle)
-    }
-}
-
-impl<T: Collectable + ?Sized> std::fmt::Pointer for HandleMut<'_, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HandleMut({:p}->{:p})", self.handle, *self.handle)
     }
 }
 
@@ -608,8 +438,7 @@ macro_rules! letroot {
             .head
             .set(unsafe { core::mem::transmute(&mut $var_name) });
         #[allow(unused_mut)]
-        let mut $var_name =
-            unsafe { $crate::api::Rooted::construct(std::pin::Pin::new(&mut $var_name)) };
+        let mut $var_name = unsafe { $crate::api::Rooted::construct(&mut $var_name.value) };
     };
 
     ($var_name : ident = $stack: expr,$value: expr) => {
@@ -631,26 +460,8 @@ macro_rules! letroot {
             .head
             .set(unsafe { core::mem::transmute(&mut $var_name) });
         #[allow(unused_mut)]
-        let mut $var_name =
-            unsafe { $crate::api::Rooted::construct(core::pin::Pin::new(&mut $var_name)) };
+        let mut $var_name = unsafe { $crate::api::Rooted::construct(&mut $var_name.value) };
     };
-}
-
-impl<T: Collectable + Sized> Rooted<'_, '_, Gc<T>> {
-    /// Get `&T` from Gc<T>
-    pub fn get(&self) -> &T {
-        unsafe {
-            let data = (*self.pinned.value.base.as_ptr()).data().cast::<T>();
-            &*data
-        }
-    }
-    // Get `&mut T` from Gc<T>
-    pub fn get_mut(&self) -> &T {
-        unsafe {
-            let data = (*self.pinned.value.base.as_ptr()).data().cast::<T>() as *mut T;
-            &*data
-        }
-    }
 }
 
 pub trait Visitor {
@@ -662,36 +473,6 @@ impl<T: Collectable + ?Sized> std::fmt::Pointer for Gc<T> {
         write!(f, "{:p}", self.base)
     }
 }
-
-pub trait GcIndex<'a, IDX> {
-    type Output: 'a;
-    fn at(&self, index: IDX) -> &'a Self::Output;
-}
-
-pub trait GcIndexMut<'a, IDX>: GcIndex<'a, IDX> {
-    fn at_mut(&mut self, index: IDX) -> &'a mut Self::Output;
-}
-
-impl<'a, I, T: Collectable + GcIndex<'a, I>> Index<I> for Handle<'a, T> {
-    type Output = <T as GcIndex<'a, I>>::Output;
-    fn index(&self, index: I) -> &Self::Output {
-        self.at(index)
-    }
-}
-
-impl<'a, I, T: Collectable + GcIndex<'a, I>> Index<I> for HandleMut<'a, T> {
-    type Output = <T as GcIndex<'a, I>>::Output;
-    fn index(&self, index: I) -> &Self::Output {
-        self.at(index)
-    }
-}
-
-impl<'a, I, T: Collectable + GcIndexMut<'a, I> + GcIndex<'a, I>> IndexMut<I> for HandleMut<'a, T> {
-    fn index_mut(&mut self, index: I) -> &'a mut Self::Output {
-        self.at_mut(index)
-    }
-}
-
 unsafe impl Trace for &mut [&mut dyn Trace] {
     fn trace(&mut self, _vis: &mut dyn Visitor) {
         for x in self.iter_mut() {
@@ -706,5 +487,44 @@ unsafe impl<T: Trace> Trace for Option<T> {
             Some(val) => val.trace(_vis),
             _ => (),
         }
+    }
+}
+
+unsafe impl<T: Collectable> Finalize for Option<T> {}
+
+impl<T: Collectable> Collectable for Option<T> {}
+
+impl<T: Collectable> Collectable for Field<T> {}
+
+impl<T: Collectable> Deref for Gc<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            let base = self.base.as_ptr();
+            &*(*base).data().cast::<T>()
+        }
+    }
+}
+
+impl<T: Collectable> DerefMut for Gc<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe {
+            let base = self.base.as_ptr();
+            &mut *((*base).data().cast::<T>() as *mut T)
+        }
+    }
+}
+
+unsafe impl<T: Trace> Trace for MaybeUninit<T> {
+    fn trace(&mut self, _vis: &mut dyn Visitor) {
+        unreachable!()
+    }
+}
+
+unsafe impl<T> Finalize for MaybeUninit<T> {}
+
+impl<T: Collectable> Collectable for MaybeUninit<T> {
+    fn allocation_size(&self) -> usize {
+        unreachable!()
     }
 }

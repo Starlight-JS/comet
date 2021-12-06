@@ -23,12 +23,32 @@ use crate::{
 /// - old objects: never move again. These objects are either allocated by mimalloc (if they are small),
 /// or in LOS (if they are not small). Collected by regular mark-n-sweep during major collections.
 ///
+/// ## Large objects
+///
+/// Large objects are allocated in [LargeObjectSpace](crate::large_space::LargeObjectSpace) and generational GC
+/// works with them too. If large object is in young space then it is not marked in minor cycle. To promote large object
+/// in minor GC cycle we just set its mark bit to 1. At start of each major collection mark bits of
+/// large objects are cleared and all unmarked large objects at the end of the cycle are dead.
+///
+///
+/// ## TODO
+///
+/// 1) old space might be compacted. To do so we have to implement our own allocation scheme. Some ideas:
+/// - Use segregated free lists for allocating in old space
+/// - When fragmentation is above some threshold (e.g 75%) we do compacting major collection
+///
+/// 2) We might make this GC semi-conservative like Mono's SGen GC. To do so we have to implement pinning for objects. Main problem
+/// is pinning objects in nursery. Because they are pinned we have to track old objects referencing young pinned objects and that is not a simple
+/// task. Also to identify objects on stack we might need bitmap to see if object pointer is indeed allocated in young or old space. Keeping that
+/// bitmap is also additional memory and performance cost.
+///
 pub struct MiniMarkGC {
     nursery: BumpPointerSpace,
     old_space: OldSpace,
     los: LargeObjectSpace,
     mark_stack: Vec<*mut HeapObjectHeader>,
     stack: ShadowStack,
+    young_objects_with_finalizers: Vector<*mut HeapObjectHeader>,
     objects_with_finalizers: Vector<*mut HeapObjectHeader>,
     remembered: Vec<*mut HeapObjectHeader>,
     major_collection_threshold: f64,
@@ -39,6 +59,10 @@ pub struct MiniMarkGC {
 }
 
 impl MiniMarkGC {
+    pub fn old_space_allocated(&self) -> usize {
+        self.old_space.allocated_bytes
+    }
+
     pub fn is_young<T: Collectable + ?Sized>(&self, x: Gc<T>) -> bool {
         !self.is_old(x.base.as_ptr())
     }
@@ -91,6 +115,7 @@ impl MiniMarkGC {
                 heap: unsafe { libmimalloc_sys::mi_heap_new() },
                 allocated_bytes: 0,
             },
+            young_objects_with_finalizers: Vector::new(),
             objects_with_finalizers: Vector::new(),
             mark_stack: vec![],
             los: LargeObjectSpace::new(),
@@ -126,30 +151,38 @@ impl MiniMarkGC {
         self.next_major_collection_initial = threshold as _;
         self.next_major_collection_threshold = threshold as _;
     }
-    fn deal_with_finalizers(&mut self, eden: bool) {
-        let mut new_vec = Vector::new();
 
-        while let Some(object) = self.objects_with_finalizers.pop_back() {
+    fn deal_with_young_objects_with_finalizers(&mut self) {
+        while let Some(object) = self.young_objects_with_finalizers.pop_back() {
             unsafe {
                 if (*object).is_forwarded() {
-                    new_vec.push_front((*object).vtable() as *mut HeapObjectHeader);
+                    let object = (*object).vtable() as *mut HeapObjectHeader;
+                    self.objects_with_finalizers.push_back(object);
                 } else if (*object).is_precise()
                     && (*PreciseAllocation::from_cell(object)).is_marked()
                 {
-                    new_vec.push_front(object);
+                    self.objects_with_finalizers.push_back(object);
                 } else {
-                    if eden {
-                        let object = (*object).get_dyn();
-                        object.finalize();
-                    } else {
-                        if !(*object).marked_bit() {
-                            (*object).get_dyn().finalize();
-                        }
-                    }
+                    (*object).get_dyn().finalize();
                 }
             }
         }
     }
+
+    fn deal_with_old_objects_with_finalizers(&mut self) {
+        let mut new_objects = Vector::new();
+        while let Some(object) = self.objects_with_finalizers.pop_back() {
+            unsafe {
+                if (*object).marked_bit() {
+                    new_objects.push_back(object);
+                } else {
+                    (*object).get_dyn().finalize();
+                }
+            }
+        }
+        self.objects_with_finalizers = new_objects;
+    }
+
     fn total_memory_used(&self) -> usize {
         self.old_space.allocated_bytes + self.los.bytes
     }
@@ -237,7 +270,9 @@ impl MiniMarkGC {
                 (*object).get_dyn().trace(&mut YoungTrace { gc: self });
             }
         }
-        self.deal_with_finalizers(true);
+        if !self.young_objects_with_finalizers.is_empty() {
+            self.deal_with_young_objects_with_finalizers();
+        }
         self.los.sweep();
         let begin = self.nursery.begin();
         self.nursery.set_end(begin);
@@ -267,7 +302,9 @@ impl MiniMarkGC {
                 (*object).get_dyn().trace(&mut OldTrace { gc: self });
             }
         }
-        self.deal_with_finalizers(false);
+        if !self.objects_with_finalizers.is_empty() {
+            self.deal_with_old_objects_with_finalizers();
+        }
         self.los.sweep();
         self.old_space.sweep();
         let total_memory_used = self.total_memory_used();
@@ -335,7 +372,11 @@ impl OldSpace {
     #[inline]
     fn alloc(&mut self, size: usize) -> *mut u8 {
         self.allocated_bytes += size;
-        unsafe { libmimalloc_sys::mi_heap_malloc_aligned(self.heap, size, MIN_ALLOCATION).cast() }
+        let ptr = unsafe {
+            libmimalloc_sys::mi_heap_malloc_aligned(self.heap, size, MIN_ALLOCATION).cast()
+        };
+
+        ptr
     }
 
     fn sweep(&mut self) {
@@ -356,10 +397,11 @@ impl OldSpace {
                 let object = block.cast::<HeapObjectHeader>();
                 if (*object).marked_bit() {
                     (*object).unmark();
+                    old_space.allocated_bytes += block_size;
                 } else {
                     libmimalloc_sys::mi_free(block);
                 }
-                old_space.allocated_bytes += block_size;
+
                 true
             }
             libmimalloc_sys::mi_heap_visit_blocks(
@@ -373,12 +415,28 @@ impl OldSpace {
 }
 
 impl GcBase for MiniMarkGC {
+    /*fn add_local_scope(&mut self, scope: &mut LocalScope) {
+        if self.head.is_null() && self.tail.is_null() {
+            self.head = scope as *mut _;
+            self.tail = scope as *mut _;
+            scope.next = null_mut();
+            scope.prev = null_mut();
+        } else {
+            scope.prev = self.tail;
+            scope.next = null_mut();
+            unsafe {
+                (*self.tail).next = scope as *mut _;
+                self.tail = scope as *mut _;
+            }
+        }
+    }*/
     fn finalize_handlers(&self) -> &Vector<*mut HeapObjectHeader> {
         &self.objects_with_finalizers
     }
     fn finalize_handlers_mut(&mut self) -> &mut Vector<*mut HeapObjectHeader> {
         &mut self.objects_with_finalizers
     }
+    #[inline(always)]
     fn shadow_stack<'a>(&self) -> &'a ShadowStack {
         unsafe { std::mem::transmute(&self.stack) }
     }
@@ -401,7 +459,7 @@ impl GcBase for MiniMarkGC {
             MIN_ALLOCATION,
         );
         unsafe {
-            let mut memory = if likely(size <= 64 * 1024) {
+            let mut memory = if likely(size < 64 * 1024) {
                 self.nursery.alloc_thread_unsafe(size, &mut 0, &mut 0)
             } else {
                 self.los.allocate(size)
@@ -423,7 +481,7 @@ impl GcBase for MiniMarkGC {
             }
             ((*memory).data() as *mut T).write(value);
             if std::mem::needs_drop::<T>() {
-                self.objects_with_finalizers.push_back(memory);
+                self.young_objects_with_finalizers.push_back(memory);
             }
             // self.num_allocated_since_last_gc += 1;
             Gc {
@@ -452,7 +510,7 @@ impl GcBase for MiniMarkGC {
             MIN_ALLOCATION,
         );
         unsafe {
-            let memory = if likely(size <= 64 * 1024) {
+            let memory = if likely(size < 64 * 1024) {
                 self.nursery.alloc_thread_unsafe(size, &mut 0, &mut 0)
             } else {
                 self.los.allocate(size)
@@ -474,7 +532,7 @@ impl GcBase for MiniMarkGC {
             }
             ((*memory).data() as *mut T).write(value);
             if std::mem::needs_drop::<T>() {
-                self.objects_with_finalizers.push_back(memory);
+                self.young_objects_with_finalizers.push_back(memory);
             }
             // self.num_allocated_since_last_gc += 1;
             Ok(Gc {
@@ -490,18 +548,49 @@ impl GcBase for MiniMarkGC {
     }
 
     /// Performs full GC cycle. It includes both minor and major cycles.
-
+    #[inline(never)]
     fn full_collection(&mut self, refs: &mut [&mut dyn Trace]) {
         self.minor_collection_(refs);
         self.major_collection_(refs);
     }
 
     fn register_finalizer<T: Collectable + ?Sized>(&mut self, object: Gc<T>) {
-        for obj in self.objects_with_finalizers.iter() {
-            if *obj == object.base.as_ptr() {
-                return;
+        self.young_objects_with_finalizers
+            .push_back(object.base.as_ptr());
+    }
+
+    fn allocate_raw<T: Collectable>(
+        &mut self,
+        size: usize,
+    ) -> Option<Gc<std::mem::MaybeUninit<T>>> {
+        let size = align_usize(size + size_of::<HeapObjectHeader>(), MIN_ALLOCATION);
+        unsafe {
+            let memory = if likely(size < 64 * 1024) {
+                self.nursery.alloc_thread_unsafe(size, &mut 0, &mut 0)
+            } else {
+                self.los.allocate(size)
+            };
+            if unlikely(memory.is_null()) {
+                return None;
             }
+
+            // self.total_allocations += size;
+            memory.write(HeapObjectHeader {
+                value: 0,
+                type_id: crate::small_type_id::<T>(),
+                padding: 0,
+            });
+            (*memory).set_vtable(vtable_of::<T>());
+            if size <= 64 * 1024 {
+                (*memory).set_size(size);
+            } else {
+                (*memory).set_size(0);
+            }
+
+            Some(Gc {
+                base: NonNull::new_unchecked(memory),
+                marker: Default::default(),
+            })
         }
-        self.objects_with_finalizers.push_back(object.base.as_ptr());
     }
 }

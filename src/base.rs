@@ -1,6 +1,8 @@
+use std::mem::MaybeUninit;
+
 use im::Vector;
 
-use crate::api::{Collectable, Gc, HandleMut, HeapObjectHeader, ShadowStack, Trace};
+use crate::api::{Collectable, Gc, HeapObjectHeader, ShadowStack, Trace};
 
 pub trait GcBase {
     const MOVING_GC: bool = false;
@@ -37,11 +39,11 @@ pub trait GcBase {
     fn allocate<T: Collectable + 'static>(&mut self, value: T) -> Gc<T>;
     fn allocate_and_init<T: Collectable + 'static + Unpin, F>(&mut self, value: T, init: F) -> Gc<T>
     where
-        F: FnOnce(HandleMut<'_, T>),
+        F: FnOnce(&'_ mut Gc<T>),
     {
         let stack = self.shadow_stack();
         letroot!(value = stack, self.allocate(value));
-        init(value.handle_mut());
+        init(&mut value);
         *value
     }
 
@@ -51,13 +53,15 @@ pub trait GcBase {
         refs: &mut [&mut dyn Trace],
     ) -> Gc<T>;
     fn try_allocate<T: Collectable + 'static>(&mut self, value: T) -> Result<Gc<T>, T>;
-
+    /// Allocate raw memory for `T`. User is responsible for initializing it.
+    fn allocate_raw<T: Collectable>(&mut self, size: usize) -> Option<Gc<MaybeUninit<T>>>;
     /// Triggers garbage collection cycle. It is up to GC impl to decide whether to do full or minor cycle.
     fn collect(&mut self, refs: &mut [&mut dyn Trace]);
 
     fn minor_collection(&mut self, refs: &mut [&mut dyn Trace]) {
         self.collect(refs);
     }
+    #[inline(never)]
     fn full_collection(&mut self, refs: &mut [&mut dyn Trace]) {
         self.collect(refs);
     }
@@ -65,4 +69,14 @@ pub trait GcBase {
     /// Registers object as finalizable. This function should be used when you want to execute finalizer
     /// even when `needs_drop::<T>()` returns false.
     fn register_finalizer<T: Collectable + ?Sized>(&mut self, object: Gc<T>);
+
+    //  fn add_local_scope(&mut self, scope: &mut LocalScope);
+}
+
+unsafe impl<T: Trace> Trace for [T] {
+    fn trace(&mut self, _vis: &mut dyn crate::api::Visitor) {
+        for x in self.iter_mut() {
+            x.trace(_vis);
+        }
+    }
 }

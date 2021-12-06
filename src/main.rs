@@ -1,61 +1,47 @@
-use comet::api::{Collectable, Field, Finalize, Trace};
+use comet::alloc::fixed_array::FixedArray;
+
+use comet::alloc::string::GcStr;
+use comet::api::{Collectable, Field, Finalize, Gc, Trace};
 use comet::base::GcBase;
 use comet::letroot;
 use comet::minimark::MiniMarkGC;
 
-struct Foo {
-    bar: Option<Field<Bar>>,
+enum Node {
+    None,
+    Some { value: i64, next: Gc<Node> },
 }
 
-unsafe impl Trace for Foo {
+unsafe impl Trace for Node {
     fn trace(&mut self, _vis: &mut dyn comet::api::Visitor) {
-        self.bar.trace(_vis);
+        match self {
+            Self::Some { next, .. } => {
+                next.trace(_vis);
+            }
+            _ => (),
+        }
     }
 }
 
-unsafe impl Finalize for Foo {}
-impl Collectable for Foo {}
+unsafe impl Finalize for Node {}
 
-pub struct Bar {
-    x: u32,
-}
-
-unsafe impl Trace for Bar {}
-unsafe impl Finalize for Bar {}
-impl Collectable for Bar {}
-
-pub struct LargeFoo {
-    bar: Option<Field<Bar>>,
-}
-
-unsafe impl Trace for LargeFoo {
-    fn trace(&mut self, _vis: &mut dyn comet::api::Visitor) {
-        self.bar.trace(_vis);
-    }
-}
-
-unsafe impl Finalize for LargeFoo {}
-impl Collectable for LargeFoo {
-    fn allocation_size(&self) -> usize {
-        128 * 1024
-    }
-}
+impl Collectable for Node {}
 fn main() {
-    let mut minimark = MiniMarkGC::new(Some(1 * 1024), None, None);
-    let stack = minimark.shadow_stack();
+    let mut heap = MiniMarkGC::new(Some(4 * 1024 * 1024), None, None);
+    let stack = heap.shadow_stack();
+    let start = std::time::Instant::now();
+    letroot!(list = stack, heap.allocate(Node::None));
+    let mut i = 0;
+    while i < 500_000_000 {
+        *list = heap.allocate(Node::Some {
+            value: 42,
+            next: *list,
+        });
 
-    letroot!(foo = stack, minimark.allocate(LargeFoo { bar: None }));
-    assert!(minimark.is_young(*foo));
-    minimark.minor_collection(&mut []);
-
-    assert!(!minimark.is_young(*foo));
-
-    let bar = minimark.allocate(Bar { x: 420 });
-    assert!(minimark.is_young(bar));
-    foo.handle_mut().bar = Some(bar.to_field());
-    minimark.write_barrier(*foo, bar);
-
-    minimark.minor_collection(&mut []);
-    assert_eq!(foo.handle().bar.as_ref().unwrap().x, 420);
-    assert!(!minimark.is_young(foo.handle().bar.as_ref().unwrap().to_gc()));
+        if i % 8192 == 0 {
+            *list = heap.allocate(Node::None);
+        }
+        i += 1;
+    }
+    println!("{:.2}", heap.old_space_allocated() as f64 / 1024.0 / 1024.0);
+    println!("Done {} {}ms", i, start.elapsed().as_millis());
 }

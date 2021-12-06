@@ -8,6 +8,8 @@ edition = "2021"
 [dependencies]
 mopa = "0.2"
 libc = "0.2.98"
+ahash = "0.7"
+hashbrown = "0.11"
 atomic = "0.5"
 im = "15.0"
 libmimalloc-sys = { features = ["extended"], version = "0.1" }
