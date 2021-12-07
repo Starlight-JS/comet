@@ -5,7 +5,7 @@ use std::{
     ptr::{null_mut, NonNull},
 };
 
-use crate::{large_space::PreciseAllocation, small_type_id, util::*};
+use crate::{base::GcBase, large_space::PreciseAllocation, small_type_id, util::*};
 use mopa::mopafy;
 pub unsafe trait Trace {
     fn trace(&mut self, _vis: &mut dyn Visitor) {}
@@ -348,6 +348,7 @@ impl<'a, T: Rootable> ShadowStackInternal<'a, T> {
 }
 impl<T: Rootable> Drop for ShadowStackInternal<'_, T> {
     /// Drop current shadow stack entry and update shadow stack state.
+    #[inline(always)]
     fn drop(&mut self) {
         (*self.stack).head.set(self.prev);
     }
@@ -526,5 +527,15 @@ unsafe impl<T> Finalize for MaybeUninit<T> {}
 impl<T: Collectable> Collectable for MaybeUninit<T> {
     fn allocation_size(&self) -> usize {
         unreachable!()
+    }
+}
+
+pub trait WriteBarrier<T> {
+    fn write_barrier<H: GcBase>(&self, field: T, heap: &mut H);
+}
+
+impl<T: Collectable + ?Sized, U: Collectable + ?Sized> WriteBarrier<Gc<U>> for Gc<T> {
+    fn write_barrier<H: GcBase>(&self, field: Gc<U>, heap: &mut H) {
+        heap.write_barrier(*self, field);
     }
 }

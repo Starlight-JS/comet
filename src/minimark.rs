@@ -11,6 +11,7 @@ use crate::{
     base::GcBase,
     bump_pointer_space::{align_usize, BumpPointerSpace},
     large_space::{LargeObjectSpace, PreciseAllocation},
+    util::stack::approximate_stack_pointer,
 };
 
 pub const VERBOSE: bool = cfg!(feature = "minimark-verbose");
@@ -68,21 +69,6 @@ impl MiniMarkGC {
         !self.is_old(x.base.as_ptr())
     }
 
-    pub fn write_barrier<T: Collectable + ?Sized, U: Collectable + ?Sized>(
-        &mut self,
-        object: Gc<T>,
-        field: Gc<U>,
-    ) {
-        unsafe {
-            let base = object.base.as_ptr();
-            let fbase = field.base.as_ptr();
-            if self.is_old(base) && !self.is_old(fbase) {
-                if !(*base).marked_bit() {
-                    self.write_barrier_slow(base);
-                }
-            }
-        }
-    }
     #[cold]
     fn write_barrier_slow(&mut self, base: *mut HeapObjectHeader) {
         unsafe {
@@ -259,13 +245,49 @@ impl MiniMarkGC {
         }
     }
 
+    fn find_conservatively_young(&mut self) {
+        let mut cursor = approximate_stack_pointer();
+        let mut end = crate::util::stack::BOUNDS.with(|x| x.origin as *mut *mut u8);
+        if cursor > end {
+            std::mem::swap(&mut cursor, &mut end);
+        }
+
+        let nursery_start = self.nursery.begin();
+        let nursery_end = self.nursery.end();
+        while cursor < end {
+            unsafe {
+                let ptr = cursor.read();
+                if ptr.is_null() {
+                    cursor = cursor.add(1);
+                    continue;
+                }
+
+                let mut addr = ptr as usize;
+                addr &= !(MIN_ALLOCATION - 1);
+                if addr >= nursery_start as usize && addr < nursery_end as usize {
+                    if ptr.cast::<usize>().read() == 0 {
+                        cursor = cursor.add(1);
+                        continue;
+                    }
+
+                    let hdr = ptr as *mut HeapObjectHeader;
+                    if (*hdr).size() >= MIN_ALLOCATION {
+                        // TODO: pin object
+                    }
+                }
+
+                cursor = cursor.add(1);
+            }
+        }
+    }
+
     fn minor_collection_(&mut self, keep: &mut [&mut dyn Trace]) {
         if VERBOSE {
             eprintln!("MiniMark: Minor collection");
         }
         self.los.prepare_for_marking(true);
         self.los.begin_marking(false);
-
+        self.find_conservatively_young();
         for ref_ in keep {
             ref_.trace(&mut YoungTrace { gc: self });
         }
@@ -292,6 +314,13 @@ impl MiniMarkGC {
         }
 
         let begin = self.nursery.begin();
+        let end = self.nursery.end();
+        unsafe {
+            memx::memset(
+                std::slice::from_raw_parts_mut(begin, end.offset_from(begin) as _),
+                0,
+            );
+        }
         self.nursery.set_end(begin);
         self.los.prepare_for_allocation(true);
         self.los.sweep();
@@ -441,6 +470,22 @@ impl OldSpace {
 }
 
 impl GcBase for MiniMarkGC {
+    #[inline]
+    fn write_barrier<T: Collectable + ?Sized, U: Collectable + ?Sized>(
+        &mut self,
+        object: Gc<T>,
+        field: Gc<U>,
+    ) {
+        unsafe {
+            let base = object.base.as_ptr();
+            let fbase = field.base.as_ptr();
+            if self.is_old(base) && !self.is_old(fbase) {
+                if !(*base).marked_bit() {
+                    self.write_barrier_slow(base);
+                }
+            }
+        }
+    }
     /*fn add_local_scope(&mut self, scope: &mut LocalScope) {
         if self.head.is_null() && self.tail.is_null() {
             self.head = scope as *mut _;

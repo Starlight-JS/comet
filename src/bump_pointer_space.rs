@@ -72,6 +72,7 @@ impl BumpPointerSpace {
         self.end
             .store((end as usize + num_bytes) as _, atomic::Ordering::Relaxed);
         *usable_size = num_bytes;
+
         obj
     }
     /// Release the pages back to the operating system

@@ -29,16 +29,10 @@ impl Collectable for Node {}
 fn main() {
     let mut heap = MiniMarkGC::new(Some(4 * 1024 * 1024), None, None);
     let stack = heap.shadow_stack();
-    letroot!(
-        vec = stack,
-        Vector::<u8>::with_capacity(&mut *heap, 128 * 1024)
-    );
+    letroot!(vec = stack, Vector::<u8>::with_capacity(&mut *heap, 8));
     vec.push_back(&mut *heap, 42);
-    println!("{:p}", &vec[0]);
+    vec.push_back(&mut *heap, 44);
+    vec.insert(&mut *heap, 1, 43);
 
-    heap.collect(&mut []);
-    letroot!(v2 = stack, *vec);
-    *vec = Vector::<u8>::with_capacity(&mut *heap, 42);
-    heap.full_collection(&mut []);
     //println!("{:p}", &vec[0])
 }

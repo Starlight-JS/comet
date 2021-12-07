@@ -88,6 +88,7 @@ impl<T: Collectable + Sized, H: GcBase + 'static> Gc<Vector<T, H>> {
     }
 
     // allocates new vector in GC heap. Updates `self` with new vector.
+    #[inline(never)]
     fn realloc(&mut self, heap: &mut H, size: usize) -> Self {
         letroot!(this = heap.shadow_stack(), *self);
         let capacity = next_capacity::<T>(this.capacity as _).max(size);
@@ -107,6 +108,34 @@ impl<T: Collectable + Sized, H: GcBase + 'static> Gc<Vector<T, H>> {
         this.length = 0;
         *self = new_self;
         new_self
+    }
+    #[inline]
+    pub fn insert(&mut self, heap: &mut H, index: usize, value: T) -> Self {
+        let len = self.len();
+        letroot!(value = heap.shadow_stack(), Some(value));
+
+        if index > len {
+            panic!(
+                "insertion index (is {}) should be <= len (is {})",
+                index, len
+            );
+        }
+
+        if len == self.capacity() {
+            *self = self.reserve(heap);
+        }
+        unsafe {
+            let p = self.data_mut().add(index);
+            std::ptr::copy(p, p.add(1), len - index);
+            std::ptr::write(p, value.take().unwrap());
+            self.length = (len + 1) as u32;
+        }
+        *self
+    }
+
+    pub fn reserve(&mut self, heap: &mut H) -> Self {
+        *self = self.realloc(heap, self.capacity() + 1);
+        *self
     }
 }
 

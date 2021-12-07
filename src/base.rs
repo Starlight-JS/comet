@@ -69,7 +69,14 @@ pub trait GcBase {
     /// Registers object as finalizable. This function should be used when you want to execute finalizer
     /// even when `needs_drop::<T>()` returns false.
     fn register_finalizer<T: Collectable + ?Sized>(&mut self, object: Gc<T>);
-
+    fn write_barrier<T: Collectable + ?Sized, U: Collectable + ?Sized>(
+        &mut self,
+        object: Gc<T>,
+        field: Gc<U>,
+    ) {
+        let _ = object;
+        let _ = field;
+    }
     //  fn add_local_scope(&mut self, scope: &mut LocalScope);
 }
 
