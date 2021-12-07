@@ -470,6 +470,8 @@ impl OldSpace {
 }
 
 impl GcBase for MiniMarkGC {
+    /// Write barrier for managing old to young pointers. If `object` is old and `field` is young objects
+    /// then `object` is marked and added to remembered set to be traced at next minor collection.
     #[inline]
     fn write_barrier<T: Collectable + ?Sized, U: Collectable + ?Sized>(
         &mut self,
@@ -523,6 +525,9 @@ impl GcBase for MiniMarkGC {
     fn finalize_lock(&self) -> bool {
         false
     }
+
+    /// Allocates `value` on GC heap. If nursery is empty will trigger minor collection and in case major threshold is reached
+    /// major collection is performed too.
     #[inline(always)]
     fn allocate<T: Collectable + 'static>(&mut self, mut value: T) -> Gc<T> {
         let size = align_usize(

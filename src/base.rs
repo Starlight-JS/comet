@@ -4,6 +4,7 @@ use im::Vector;
 
 use crate::api::{Collectable, Gc, HeapObjectHeader, ShadowStack, Trace};
 
+/// A base trait for all garbage collector implementations.
 pub trait GcBase {
     const MOVING_GC: bool = false;
     const NEEDS_WRITE_BARRIER: bool = false;
@@ -34,8 +35,13 @@ pub trait GcBase {
         self.set_finalize_lock(false);
     }
 
+    /// Returns shadow stack reference that is valid only for scope lifetime
     fn shadow_stack<'a>(&self) -> &'a ShadowStack;
 
+    /// Allocates `value` on GC heap.
+    ///
+    ///
+    /// **NOTE**: Might trigger GC cycle if there is no enough memory or certain threshold is reached (depends on GC impl)
     fn allocate<T: Collectable + 'static>(&mut self, value: T) -> Gc<T>;
     fn allocate_and_init<T: Collectable + 'static + Unpin, F>(&mut self, value: T, init: F) -> Gc<T>
     where
@@ -46,21 +52,24 @@ pub trait GcBase {
         init(&mut value);
         *value
     }
-
+    /// Same as [GcBase::allocate] but also allows to pass some references as protected in case GC cycle happens.
     fn allocate_safe<T: Collectable + 'static>(
         &mut self,
         value: T,
         refs: &mut [&mut dyn Trace],
     ) -> Gc<T>;
+    /// Tries to allocate `value` on GC heap, if there is no enough memory `Err(value)` is returned.
     fn try_allocate<T: Collectable + 'static>(&mut self, value: T) -> Result<Gc<T>, T>;
     /// Allocate raw memory for `T`. User is responsible for initializing it.
     fn allocate_raw<T: Collectable>(&mut self, size: usize) -> Option<Gc<MaybeUninit<T>>>;
     /// Triggers garbage collection cycle. It is up to GC impl to decide whether to do full or minor cycle.
     fn collect(&mut self, refs: &mut [&mut dyn Trace]);
 
+    /// Minor collection cycle. By default invokes [GcBase::collect].
     fn minor_collection(&mut self, refs: &mut [&mut dyn Trace]) {
         self.collect(refs);
     }
+    /// Full collection cycle. By default invokes [GcBase::collect].
     #[inline(never)]
     fn full_collection(&mut self, refs: &mut [&mut dyn Trace]) {
         self.collect(refs);
@@ -69,6 +78,8 @@ pub trait GcBase {
     /// Registers object as finalizable. This function should be used when you want to execute finalizer
     /// even when `needs_drop::<T>()` returns false.
     fn register_finalizer<T: Collectable + ?Sized>(&mut self, object: Gc<T>);
+    /// Write barrier implementation. By default it is no-op.
+    #[inline(always)]
     fn write_barrier<T: Collectable + ?Sized, U: Collectable + ?Sized>(
         &mut self,
         object: Gc<T>,
