@@ -6,7 +6,10 @@ use std::{
 };
 
 use crate::{
-    api::HeapObjectHeader, bitmap::round_up, space::ContinuousMemMapAllocSpace, util::mmap::Mmap,
+    api::{HeapObjectHeader, MIN_ALLOCATION},
+    bitmap::round_up,
+    space::ContinuousMemMapAllocSpace,
+    util::mmap::Mmap,
 };
 
 #[repr(C)]
@@ -128,7 +131,7 @@ impl BumpPointerSpace {
                 .is_err()
         } {}
         debug_assert!(
-            is_aligned(old_end as usize, 16),
+            is_aligned(old_end as usize, MIN_ALLOCATION),
             "unaligned pointer {:p} {}",
             old_end,
             num_bytes

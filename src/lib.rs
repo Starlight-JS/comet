@@ -14,11 +14,12 @@ pub mod bump_pointer_space;
 pub mod large_space;
 pub mod minimark;
 pub mod miri_stack;
+pub mod object_allocator;
 pub mod page;
 pub mod semispace;
 pub mod space;
 pub mod stack;
-
+pub mod sweeper;
 #[cfg(test)]
 pub mod tests;
 

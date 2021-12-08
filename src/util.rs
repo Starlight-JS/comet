@@ -48,10 +48,11 @@ impl BitFieldTrait<48, 1> for MarkedBitField {
     type Next = MarkedBitField;
 }
 
-impl BitFieldTrait<50, 12> for SizeBitField {
+impl BitFieldTrait<0, 13> for SizeBitField {
     type Next = MarkedBitField;
 }
 
+pub mod bits;
 pub mod mmap;
 pub mod stack;
 pub struct MarkBit;

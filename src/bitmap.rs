@@ -147,6 +147,37 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
                 != 0
         }
     }
+
+    pub fn find_header(
+        &mut self,
+        address_maybe_pointing_to_the_middle_of_object: *const u8,
+    ) -> *mut HeapObjectHeader {
+        let address_maybe_pointing_to_the_middle_of_object =
+            address_maybe_pointing_to_the_middle_of_object as usize;
+        let object_offset =
+            address_maybe_pointing_to_the_middle_of_object.wrapping_sub(self.heap_begin);
+        let object_start_number = object_offset / ALIGN;
+
+        let mut cell_index = object_start_number / BITS_PER_INTPTR;
+        let bit = object_start_number & (BITS_PER_INTPTR - 1);
+
+        let mut word = unsafe { self.bitmap_begin.add(cell_index).cast::<usize>().read() }
+            & ((1 << (bit + 1)) - 1);
+
+        while word == 0 && cell_index != 0 {
+            word = unsafe {
+                cell_index -= 1;
+                self.bitmap_begin.add(cell_index).cast::<usize>().read()
+            };
+        }
+        let leading_zeros = word.leading_zeros() as usize;
+        let object_start_number =
+            (cell_index * BITS_PER_INTPTR) + (BITS_PER_INTPTR - 1) - leading_zeros;
+        let object_offset = object_start_number * MIN_ALLOCATION;
+
+        (object_offset + self.heap_begin) as _
+    }
+
     #[inline(always)]
     pub fn modify<const SET_BIT: bool>(&self, obj: *const u8) -> bool {
         let addr = obj as usize;
@@ -580,5 +611,75 @@ impl HeapBitmap {
 
     pub fn add_continuous_space(&mut self, space: *const SpaceBitmap<{ MIN_ALLOCATION }>) {
         self.continuous_space_bitmaps.push(space);
+    }
+}
+
+pub struct ObjectStartBitmap {
+    #[allow(dead_code)]
+    mmap: Mmap,
+    bitmap: *mut u8,
+    offset: usize,
+}
+
+impl ObjectStartBitmap {
+    pub const BITS_PER_CELL: usize = 8;
+    pub const CELL_MASK: usize = Self::BITS_PER_CELL - 1;
+    pub fn new(heap_begin: *const u8, size: usize) -> Self {
+        let mmap = Mmap::new(Self::allocation_size(size));
+        Self {
+            bitmap: mmap.start(),
+            mmap,
+            offset: heap_begin as _,
+        }
+    }
+    pub fn allocation_size(heap_size: usize) -> usize {
+        (heap_size + ((Self::BITS_PER_CELL * MIN_ALLOCATION) - 1))
+            / (Self::BITS_PER_CELL * MIN_ALLOCATION)
+    }
+
+    pub fn load(&self, index: usize) -> u8 {
+        unsafe { self.bitmap.add(index).read() }
+    }
+
+    pub fn store(&self, index: usize, bit: u8) {
+        unsafe {
+            self.bitmap.add(index).write(bit);
+        }
+    }
+    fn object_start_index_and_bit(&self, addr: usize, cell_index: &mut usize, bit: &mut usize) {
+        let object_offset = addr - self.offset;
+        let object_start_number = object_offset / MIN_ALLOCATION;
+        *cell_index = object_start_number / Self::BITS_PER_CELL;
+        *bit = object_start_number & Self::CELL_MASK;
+    }
+    pub fn set_bit(&self, addr: *const u8) {
+        let mut cell_index = 0;
+        let mut object_bit = 0;
+        self.object_start_index_and_bit(addr as _, &mut cell_index, &mut object_bit);
+        self.store(cell_index, self.load(cell_index) | (1 << object_bit));
+    }
+
+    pub fn clear_bit(&self, addr: *const u8) {
+        let mut cell_index = 0;
+        let mut object_bit = 0;
+        self.object_start_index_and_bit(addr as _, &mut cell_index, &mut object_bit);
+        self.store(cell_index, self.load(cell_index) & !(1 << object_bit));
+    }
+
+    pub fn find_header(&self, addr_in_middle: *const u8) -> *mut HeapObjectHeader {
+        let mut object_offset = addr_in_middle as usize - self.offset;
+        let mut object_start_number = object_offset / MIN_ALLOCATION;
+        let mut cell_index = object_start_number / Self::BITS_PER_CELL;
+        let bit = object_start_number & Self::CELL_MASK;
+        let mut byte = self.load(cell_index) & ((1 << (bit + 1)) - 1);
+        while byte == 0 && cell_index != 0 {
+            cell_index -= 1;
+            byte = self.load(cell_index);
+        }
+        let leading_zeros = byte.leading_zeros();
+        object_start_number =
+            (cell_index * Self::BITS_PER_CELL) + (Self::BITS_PER_CELL - 1) - leading_zeros as usize;
+        object_offset = object_start_number * MIN_ALLOCATION;
+        (object_offset + self.offset) as _
     }
 }

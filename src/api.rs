@@ -30,13 +30,22 @@ pub unsafe trait Finalize {
 pub struct HeapObjectHeader {
     pub value: u64,
 
-    pub padding: u32,
+    pub padding: u16,
+    pub padding2: u16,
     pub type_id: u32,
 }
 
-pub const MIN_ALLOCATION: usize = 16;
+pub const MIN_ALLOCATION: usize = 8;
 
 impl HeapObjectHeader {
+    #[inline]
+    pub fn set_free(&mut self) {
+        self.value = VTableBitField::update(self.value, 0);
+    }
+    #[inline]
+    pub fn is_free(&self) -> bool {
+        self.vtable() == 0
+    }
     #[inline(always)]
     pub fn get_dyn(&mut self) -> &mut dyn Collectable {
         unsafe {
@@ -58,20 +67,21 @@ impl HeapObjectHeader {
 
     #[inline(always)]
     pub fn size(&self) -> usize {
-        SizeBitField::decode(self.value) as usize * MIN_ALLOCATION
+        SizeBitField::decode(self.padding2 as _) as usize * MIN_ALLOCATION
     }
     #[inline(always)]
     pub fn is_precise(&self) -> bool {
-        SizeBitField::decode(self.value) == 0
+        SizeBitField::decode(self.padding2 as _) == 0
     }
     #[inline(always)]
     pub fn set_size(&mut self, size: usize) {
         //assert!(size != 0);
-        self.value = SizeBitField::update(self.value, size as u64 / MIN_ALLOCATION as u64);
+        self.padding2 =
+            SizeBitField::update(self.padding2 as _, size as u64 / MIN_ALLOCATION as u64) as _;
     }
     #[inline(always)]
     pub fn set_large(&mut self) {
-        self.value = SizeBitField::update(self.value, 0);
+        self.padding2 = SizeBitField::update(self.padding2 as _, 0) as _;
     }
     #[inline(always)]
     pub fn vtable(&self) -> usize {

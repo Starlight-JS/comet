@@ -2,7 +2,7 @@ use std::mem::MaybeUninit;
 
 use im::Vector;
 
-use crate::api::{Collectable, Gc, HeapObjectHeader, ShadowStack, Trace};
+use crate::api::{Collectable, Gc, HeapObjectHeader, ShadowStack, Trace, Visitor};
 
 /// A base trait for all garbage collector implementations.
 pub trait GcBase {
@@ -88,6 +88,9 @@ pub trait GcBase {
         let _ = object;
         let _ = field;
     }
+
+    /// Register task to run just before marking. Returns `usize` that can be used later to remove this task.    
+    fn add_marking_task(&mut self, task: Box<dyn MarkingTask>) -> usize;
     //  fn add_local_scope(&mut self, scope: &mut LocalScope);
 }
 
@@ -97,4 +100,8 @@ unsafe impl<T: Trace> Trace for [T] {
             x.trace(_vis);
         }
     }
+}
+
+pub trait MarkingTask {
+    fn run(&mut self, vis: &mut dyn Visitor);
 }

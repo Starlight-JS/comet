@@ -8,7 +8,7 @@ use crate::{
     api::{
         vtable_of, Collectable, Gc, HeapObjectHeader, ShadowStack, Trace, Visitor, MIN_ALLOCATION,
     },
-    base::GcBase,
+    base::{GcBase, MarkingTask},
     bump_pointer_space::{align_usize, BumpPointerSpace},
     large_space::{LargeObjectSpace, PreciseAllocation},
     util::stack::approximate_stack_pointer,
@@ -58,6 +58,7 @@ pub struct MiniMarkGC {
     next_major_collection_initial: usize,
     min_heap_size: usize,
     growth_rate_max: f64,
+    tasks: HashMap<usize, Box<dyn MarkingTask>>,
 }
 
 impl MiniMarkGC {
@@ -113,6 +114,7 @@ impl MiniMarkGC {
             min_heap_size: min_heap_size.unwrap_or_else(|| 8 * newsize),
             stack: ShadowStack::new(),
             growth_rate_max: growth_rate_max.unwrap_or_else(|| 1.4),
+            tasks: HashMap::new(),
         };
         this.min_heap_size = this
             .min_heap_size
@@ -304,7 +306,10 @@ impl MiniMarkGC {
 
                 (*object).get_dyn().trace(&mut YoungTrace { gc: self });
             }
-
+            let mut tasks = std::mem::replace(&mut self.tasks, HashMap::new());
+            for (_, task) in tasks.iter_mut() {
+                task.run(&mut YoungTrace { gc: self });
+            }
             while let Some(object) = self.mark_stack.pop() {
                 (*object).get_dyn().trace(&mut YoungTrace { gc: self });
             }
@@ -348,6 +353,11 @@ impl MiniMarkGC {
             stack.walk(|entry| {
                 entry.trace(&mut OldTrace { gc: self });
             });
+
+            let mut tasks = std::mem::replace(&mut self.tasks, HashMap::new());
+            for (_, task) in tasks.iter_mut() {
+                task.run(&mut OldTrace { gc: self });
+            }
 
             while let Some(object) = self.mark_stack.pop() {
                 (*object).get_dyn().trace(&mut OldTrace { gc: self });
@@ -412,6 +422,7 @@ impl<'a> Visitor for YoungTrace<'a> {
     }
 }
 
+use hashbrown::HashMap;
 use im::Vector;
 use libmimalloc_sys::{mi_heap_area_t, mi_heap_t};
 
@@ -470,6 +481,11 @@ impl OldSpace {
 }
 
 impl GcBase for MiniMarkGC {
+    fn add_marking_task(&mut self, task: Box<dyn MarkingTask>) -> usize {
+        let idx = self.tasks.len();
+        self.tasks.insert(idx, task);
+        idx
+    }
     /// Write barrier for managing old to young pointers. If `object` is old and `field` is young objects
     /// then `object` is marked and added to remembered set to be traced at next minor collection.
     #[inline]
@@ -481,6 +497,7 @@ impl GcBase for MiniMarkGC {
         unsafe {
             let base = object.base.as_ptr();
             let fbase = field.base.as_ptr();
+
             if self.is_old(base) && !self.is_old(fbase) {
                 if !(*base).marked_bit() {
                     self.write_barrier_slow(base);
@@ -548,6 +565,7 @@ impl GcBase for MiniMarkGC {
                 value: 0,
                 type_id: crate::small_type_id::<T>(),
                 padding: 0,
+                padding2: 0,
             });
             (*memory).set_vtable(vtable_of::<T>());
             if size <= 64 * 1024 {
@@ -599,6 +617,7 @@ impl GcBase for MiniMarkGC {
                 value: 0,
                 type_id: crate::small_type_id::<T>(),
                 padding: 0,
+                padding2: 0,
             });
             (*memory).set_vtable(vtable_of::<T>());
             if size <= 64 * 1024 {
@@ -655,6 +674,7 @@ impl GcBase for MiniMarkGC {
                 value: 0,
                 type_id: crate::small_type_id::<T>(),
                 padding: 0,
+                padding2: 0,
             });
             (*memory).set_vtable(vtable_of::<T>());
             if size <= 64 * 1024 {

@@ -8,10 +8,11 @@ use crate::{
     api::{
         vtable_of, Collectable, Gc, HeapObjectHeader, ShadowStack, Trace, Visitor, MIN_ALLOCATION,
     },
-    base::GcBase,
+    base::{GcBase, MarkingTask},
     bump_pointer_space::{align_usize, BumpPointerSpace},
     large_space::{LargeObjectSpace, PreciseAllocation},
 };
+use hashbrown::HashMap;
 use im::Vector;
 
 /// SemiSpace collector. It divides heap into two spaces: from_space and to_space.
@@ -36,6 +37,7 @@ pub struct SemiSpace {
     objects_moved: usize,
     total_allocations: usize,
     num_allocated_since_last_gc: usize,
+    tasks: HashMap<usize, Box<dyn MarkingTask>>,
 }
 pub fn get_forwarding_address_in_from_space(obj: *const HeapObjectHeader) -> *mut HeapObjectHeader {
     unsafe {
@@ -54,6 +56,7 @@ impl SemiSpace {
         let to_space = BumpPointerSpace::create("bump pointer 2", space_size);
 
         Box::new(Self {
+            tasks: HashMap::new(),
             from_space,
             to_space,
             objects_with_finalizers: Vector::new(),
@@ -159,6 +162,12 @@ impl Visitor for SemiSpace {
 }
 
 impl GcBase for SemiSpace {
+    fn add_marking_task(&mut self, task: Box<dyn MarkingTask>) -> usize {
+        let idx = self.tasks.len();
+
+        self.tasks.insert(idx, task);
+        idx
+    }
     fn register_finalizer<T: Collectable + ?Sized>(&mut self, object: Gc<T>) {
         for obj in self.objects_with_finalizers.iter() {
             if *obj == object.base.as_ptr() {
@@ -180,7 +189,10 @@ impl GcBase for SemiSpace {
             for var in references {
                 var.trace(self);
             }
-
+            let mut tasks = std::mem::replace(&mut self.tasks, HashMap::new());
+            for (_, task) in tasks.iter_mut() {
+                task.run(self);
+            }
             while let Some(object) = self.mark_stack.pop() {
                 (*object).get_dyn().trace(self);
             }
@@ -229,6 +241,7 @@ impl GcBase for SemiSpace {
                 value: 0,
                 type_id: crate::small_type_id::<T>(),
                 padding: 0,
+                padding2: 0,
             });
             (*memory).set_vtable(vtable_of::<T>());
             (*memory).set_size(size);
