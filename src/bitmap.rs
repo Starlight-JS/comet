@@ -633,6 +633,9 @@ impl ObjectStartBitmap {
     pub const CELL_MASK: usize = Self::BITS_PER_CELL - 1;
     pub fn new(heap_begin: *const u8, size: usize) -> Self {
         let mmap = Mmap::new(Self::allocation_size(size));
+        unsafe {
+            core::ptr::write_bytes(mmap.start(), 0, mmap.size());
+        }
         Self {
             bitmap: mmap.start(),
             mmap,
@@ -640,7 +643,7 @@ impl ObjectStartBitmap {
         }
     }
     pub fn allocation_size(heap_size: usize) -> usize {
-        (heap_size + ((Self::BITS_PER_CELL * MIN_ALLOCATION) - 1))
+        ((heap_size + 4096) + ((Self::BITS_PER_CELL * MIN_ALLOCATION) - 1))
             / (Self::BITS_PER_CELL * MIN_ALLOCATION)
     }
     #[inline(always)]
@@ -675,7 +678,12 @@ impl ObjectStartBitmap {
         self.object_start_index_and_bit(addr as _, &mut cell_index, &mut object_bit);
         self.store(cell_index, self.load(cell_index) & !(1 << object_bit));
     }
-
+    pub fn check_bit(&self, addr: *const u8) -> bool {
+        let mut cell_index = 0;
+        let mut object_bit = 0;
+        self.object_start_index_and_bit(addr as _, &mut cell_index, &mut object_bit);
+        (self.load(cell_index) & (1 << object_bit)) != 0
+    }
     pub fn find_header(&self, addr_in_middle: *const u8) -> *mut HeapObjectHeader {
         let mut object_offset = addr_in_middle as usize - self.offset;
         let mut object_start_number = object_offset / MIN_ALLOCATION;

@@ -70,7 +70,7 @@ pub trait GcBase {
         self.collect(refs);
     }
     /// Full collection cycle. By default invokes [GcBase::collect].
-    #[inline(never)]
+
     fn full_collection(&mut self, refs: &mut [&mut dyn Trace]) {
         self.collect(refs);
     }

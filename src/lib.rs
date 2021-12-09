@@ -1,4 +1,4 @@
-#![feature(core_intrinsics, const_type_id)]
+#![feature(core_intrinsics, const_type_id, is_sorted, backtrace)]
 #[macro_use]
 pub mod util;
 #[macro_use]

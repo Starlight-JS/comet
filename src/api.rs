@@ -57,12 +57,12 @@ impl HeapObjectHeader {
     }
     #[inline(always)]
     pub fn set_forwarded(&mut self, fwdptr: usize) {
-        self.value = VTableBitField::update(self.value, fwdptr as _);
-        self.value = ForwardedBit::update(self.value, 1);
+        self.value = VTableBitField::encode(fwdptr as _);
+        self.padding = ForwardedBit::encode(1) as _;
     }
     #[inline(always)]
     pub fn is_forwarded(&self) -> bool {
-        ForwardedBit::decode(self.value) != 0
+        ForwardedBit::decode(self.padding as _) != 0
     }
 
     #[inline(always)]

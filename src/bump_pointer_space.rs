@@ -60,6 +60,9 @@ impl BumpPointerSpace {
         let begin = mem_map.start();
         let end = mem_map.end();
         mem_map.commit(begin, end as usize - begin as usize);
+        unsafe {
+            memx::memset(std::slice::from_raw_parts_mut(begin, mem_map.size()), 0);
+        }
         Self {
             space: ContinuousMemMapAllocSpace::new(_name, mem_map, begin, begin, end),
             growth_end: end,

@@ -1,11 +1,11 @@
 use std::{
     marker::PhantomData,
     mem::size_of,
-    ops::{Index, IndexMut},
+    ops::{Deref, DerefMut, Index, IndexMut},
 };
 
 use crate::{
-    api::{Collectable, Finalize, Gc, Trace},
+    api::{Collectable, Finalize, Gc, Trace, WriteBarrier},
     base::GcBase,
 };
 
@@ -48,9 +48,26 @@ impl<T: Collectable + Sized, H: GcBase + 'static> Vector<T, H> {
     pub fn capacity(&self) -> usize {
         self.capacity as _
     }
+
+    pub fn clear(&mut self) {
+        unsafe {
+            for i in 0..self.len() {
+                core::ptr::drop_in_place(self.data_mut().add(i));
+            }
+            self.length = 0;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
 }
 
 impl<T: Collectable + Sized, H: GcBase + 'static> Gc<Vector<T, H>> {
+    /// Appends an element to the back of a collection.
+    ///
+    ///
+    /// **NOTE** Use [GcBase::write_barrier] after this function when `T` is GC pointer.
     #[inline]
     pub fn push_back(&mut self, heap: &mut H, value: T) -> Self {
         if self.length == self.capacity {
@@ -109,6 +126,10 @@ impl<T: Collectable + Sized, H: GcBase + 'static> Gc<Vector<T, H>> {
         *self = new_self;
         new_self
     }
+    /// Inserts an element at position index within the vector, shifting all elements after it to the right.
+    ///
+    ///
+    /// **NOTE** Use [GcBase::write_barrier] after this function when `T` is GC pointer.
     #[inline]
     pub fn insert(&mut self, heap: &mut H, index: usize, value: T) -> Self {
         let len = self.len();
@@ -192,4 +213,16 @@ const fn next_capacity<T>(capacity: usize) -> usize {
     }
 
     2 * capacity
+}
+
+impl<T: Collectable + Sized, H: GcBase + 'static> Deref for Vector<T, H> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.data(), self.len()) }
+    }
+}
+impl<T: Collectable + Sized, H: GcBase + 'static> DerefMut for Vector<T, H> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { std::slice::from_raw_parts_mut(self.data_mut(), self.len()) }
+    }
 }

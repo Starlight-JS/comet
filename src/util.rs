@@ -40,19 +40,19 @@ pub struct ParentKnown;
 
 pub struct Pinned;
 
-impl BitFieldTrait<1, 2> for Pinned {
+impl BitFieldTrait<1, 1> for Pinned {
     type Next = ParentKnown;
 }
 
-impl BitFieldTrait<1, 2> for ParentKnown {
+impl BitFieldTrait<1, 1> for ParentKnown {
     type Next = MarkBit;
 }
 
-impl BitFieldTrait<62, 1> for ForwardedBit {
+impl BitFieldTrait<2, 1> for ForwardedBit {
     type Next = MarkedBitField;
 }
 
-impl BitFieldTrait<0, 48> for VTableBitField {
+impl BitFieldTrait<0, 58> for VTableBitField {
     type Next = SizeBitField;
 }
 
@@ -71,4 +71,36 @@ pub struct MarkBit;
 
 impl BitFieldTrait<0, 1> for MarkBit {
     type Next = Self;
+}
+use std::fmt;
+pub struct FormattedSize {
+    pub size: usize,
+}
+
+impl fmt::Display for FormattedSize {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let ksize = (self.size as f64) / 1024f64;
+
+        if ksize < 1f64 {
+            return write!(f, "{}B", self.size);
+        }
+
+        let msize = ksize / 1024f64;
+
+        if msize < 1f64 {
+            return write!(f, "{:.1}K", ksize);
+        }
+
+        let gsize = msize / 1024f64;
+
+        if gsize < 1f64 {
+            write!(f, "{:.1}M", msize)
+        } else {
+            write!(f, "{:.1}G", gsize)
+        }
+    }
+}
+
+pub fn formatted_size(size: usize) -> FormattedSize {
+    FormattedSize { size }
 }

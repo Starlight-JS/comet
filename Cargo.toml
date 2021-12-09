@@ -28,3 +28,4 @@ winapi = { version = "0.3", features = [
 
 [features]
 minimark-verbose = []
+minimark-verbose-light = []

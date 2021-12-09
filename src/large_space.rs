@@ -317,6 +317,7 @@ impl LargeObjectSpace {
 
                     continue;
                 } else {
+                    (*(*allocation).cell()).unmark();
                     (*allocation).index_in_space = dst_index as u32;
                     self.allocations[dst_index] = allocation;
                     dst_index += 1;
