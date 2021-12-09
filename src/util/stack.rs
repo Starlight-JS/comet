@@ -150,3 +150,13 @@ pub fn approximate_stack_pointer() -> *mut *mut u8 {
 thread_local! {
     pub static BOUNDS: StackBounds = StackBounds::current_thread_stack_bounds();
 }
+
+pub fn get_stack_bounds_for_trace() -> (*mut *mut u8, *mut *mut u8) {
+    let mut start = BOUNDS.with(|x| x.origin) as *mut *mut u8;
+    let mut end = approximate_stack_pointer();
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
+    }
+
+    (start, end)
+}

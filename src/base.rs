@@ -80,13 +80,8 @@ pub trait GcBase {
     fn register_finalizer<T: Collectable + ?Sized>(&mut self, object: Gc<T>);
     /// Write barrier implementation. By default it is no-op.
     #[inline(always)]
-    fn write_barrier<T: Collectable + ?Sized, U: Collectable + ?Sized>(
-        &mut self,
-        object: Gc<T>,
-        field: Gc<U>,
-    ) {
+    fn write_barrier<T: Collectable + ?Sized>(&mut self, object: Gc<T>) {
         let _ = object;
-        let _ = field;
     }
 
     /// Register task to run just before marking. Returns `usize` that can be used later to remove this task.    

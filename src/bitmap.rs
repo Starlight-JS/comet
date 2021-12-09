@@ -622,6 +622,13 @@ pub struct ObjectStartBitmap {
 }
 
 impl ObjectStartBitmap {
+    pub fn empty() -> Self {
+        Self {
+            mmap: Mmap::uninit(),
+            bitmap: null_mut(),
+            offset: 0,
+        }
+    }
     pub const BITS_PER_CELL: usize = 8;
     pub const CELL_MASK: usize = Self::BITS_PER_CELL - 1;
     pub fn new(heap_begin: *const u8, size: usize) -> Self {
@@ -636,29 +643,32 @@ impl ObjectStartBitmap {
         (heap_size + ((Self::BITS_PER_CELL * MIN_ALLOCATION) - 1))
             / (Self::BITS_PER_CELL * MIN_ALLOCATION)
     }
-
+    #[inline(always)]
     pub fn load(&self, index: usize) -> u8 {
         unsafe { self.bitmap.add(index).read() }
     }
-
+    #[inline(always)]
     pub fn store(&self, index: usize, bit: u8) {
         unsafe {
             self.bitmap.add(index).write(bit);
         }
     }
+    #[inline(always)]
     fn object_start_index_and_bit(&self, addr: usize, cell_index: &mut usize, bit: &mut usize) {
         let object_offset = addr - self.offset;
         let object_start_number = object_offset / MIN_ALLOCATION;
         *cell_index = object_start_number / Self::BITS_PER_CELL;
         *bit = object_start_number & Self::CELL_MASK;
     }
+
+    #[inline(always)]
     pub fn set_bit(&self, addr: *const u8) {
         let mut cell_index = 0;
         let mut object_bit = 0;
         self.object_start_index_and_bit(addr as _, &mut cell_index, &mut object_bit);
         self.store(cell_index, self.load(cell_index) | (1 << object_bit));
     }
-
+    #[inline(always)]
     pub fn clear_bit(&self, addr: *const u8) {
         let mut cell_index = 0;
         let mut object_bit = 0;
@@ -681,5 +691,14 @@ impl ObjectStartBitmap {
             (cell_index * Self::BITS_PER_CELL) + (Self::BITS_PER_CELL - 1) - leading_zeros as usize;
         object_offset = object_start_number * MIN_ALLOCATION;
         (object_offset + self.offset) as _
+    }
+
+    pub fn clear(&self) {
+        unsafe {
+            memx::memset(
+                std::slice::from_raw_parts_mut(self.bitmap, self.mmap.size()),
+                0,
+            );
+        }
     }
 }

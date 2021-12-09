@@ -36,6 +36,18 @@ pub struct MarkedBitField;
 
 pub struct ForwardedBit;
 
+pub struct ParentKnown;
+
+pub struct Pinned;
+
+impl BitFieldTrait<1, 2> for Pinned {
+    type Next = ParentKnown;
+}
+
+impl BitFieldTrait<1, 2> for ParentKnown {
+    type Next = MarkBit;
+}
+
 impl BitFieldTrait<62, 1> for ForwardedBit {
     type Next = MarkedBitField;
 }

@@ -74,7 +74,7 @@ impl Collectable for LargeFoo2 {
 
 #[test]
 pub fn test_write_barrier() {
-    let mut minimark = MiniMarkGC::new(Some(1 * 1024), None, None);
+    let mut minimark = MiniMarkGC::new(Some(1 * 1024), None, None, false);
     let stack = minimark.shadow_stack();
 
     letroot!(foo = stack, minimark.allocate(Foo { bar: None }));
@@ -86,7 +86,7 @@ pub fn test_write_barrier() {
     let bar = minimark.allocate(Bar { x: 420 });
     assert!(minimark.is_young(bar));
     foo.bar = Some(bar);
-    minimark.write_barrier(*foo, bar);
+    minimark.write_barrier(*foo);
 
     minimark.minor_collection(&mut []);
     assert_eq!(foo.bar.as_ref().unwrap().x, 420);
@@ -95,7 +95,7 @@ pub fn test_write_barrier() {
 
 #[test]
 pub fn test_write_barrier_large() {
-    let mut minimark = MiniMarkGC::new(Some(1 * 1024), None, None);
+    let mut minimark = MiniMarkGC::new(Some(1 * 1024), None, None, false);
     let stack = minimark.shadow_stack();
 
     letroot!(foo = stack, minimark.allocate(LargeFoo { bar: None }));
@@ -107,7 +107,7 @@ pub fn test_write_barrier_large() {
     let bar = minimark.allocate(Bar { x: 420 });
     assert!(minimark.is_young(bar));
     foo.bar = Some(bar);
-    minimark.write_barrier(*foo, bar);
+    minimark.write_barrier(*foo);
 
     minimark.minor_collection(&mut []);
     assert_eq!(foo.bar.as_ref().unwrap().x, 420);
@@ -116,7 +116,7 @@ pub fn test_write_barrier_large() {
 
 #[test]
 pub fn test_write_barrier_large_2() {
-    let mut minimark = MiniMarkGC::new(Some(1 * 1024), None, None);
+    let mut minimark = MiniMarkGC::new(Some(1 * 1024), None, None, false);
     let stack = minimark.shadow_stack();
 
     letroot!(foo = stack, minimark.allocate(LargeFoo2 { bar: None }));
@@ -128,7 +128,7 @@ pub fn test_write_barrier_large_2() {
     let bar = minimark.allocate(LargeBar { x: 420 });
     assert!(minimark.is_young(bar));
     foo.bar = Some(bar);
-    minimark.write_barrier(*foo, bar);
+    minimark.write_barrier(*foo);
 
     minimark.minor_collection(&mut []);
     assert_eq!(foo.bar.as_ref().unwrap().x, 420);

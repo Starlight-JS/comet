@@ -115,6 +115,26 @@ impl HeapObjectHeader {
     pub fn type_id(&self) -> u32 {
         self.type_id
     }
+
+    #[inline(always)]
+    pub fn parent_known_bit(&self) -> bool {
+        ParentKnown::decode(self.padding as _) != 0
+    }
+
+    #[inline(always)]
+    pub fn set_parent_known_bit(&mut self, bit: bool) {
+        self.padding = ParentKnown::update(self.padding as _, bit as u64) as _;
+    }
+
+    #[inline(always)]
+    pub fn pinned_bit(&self) -> bool {
+        Pinned::decode(self.padding as _) != 0
+    }
+
+    #[inline(always)]
+    pub fn set_pinned_bit(&mut self, bit: bool) {
+        self.padding = Pinned::update(self.padding as _, bit as _) as _;
+    }
 }
 
 /// A type that should be used to store GCed struct fields. It is not movable but dereferencable.
@@ -545,7 +565,29 @@ pub trait WriteBarrier<T> {
 }
 
 impl<T: Collectable + ?Sized, U: Collectable + ?Sized> WriteBarrier<Gc<U>> for Gc<T> {
-    fn write_barrier<H: GcBase>(&self, field: Gc<U>, heap: &mut H) {
-        heap.write_barrier(*self, field);
+    fn write_barrier<H: GcBase>(&self, _field: Gc<U>, heap: &mut H) {
+        heap.write_barrier(*self);
+    }
+}
+
+impl<T: Collectable + ?Sized, U: Collectable + ?Sized> WriteBarrier<Option<Gc<U>>> for Gc<T> {
+    fn write_barrier<H: GcBase>(&self, field: Option<Gc<U>>, heap: &mut H) {
+        if let Some(_) = field {
+            heap.write_barrier(*self);
+        }
+    }
+}
+
+unsafe impl<T: Trace> Trace for Vec<T> {
+    fn trace(&mut self, vis: &mut dyn Visitor) {
+        for entry in self.iter_mut() {
+            entry.trace(vis);
+        }
+    }
+}
+
+unsafe impl<T: Trace> Trace for Box<T> {
+    fn trace(&mut self, _vis: &mut dyn Visitor) {
+        (&mut **self).trace(_vis);
     }
 }

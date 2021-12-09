@@ -45,7 +45,15 @@ impl BumpPointerSpace {
     pub fn clear_growth_limit(&mut self) {
         self.growth_end = self.limit();
     }
+    #[inline]
+    pub fn set_growth_limit(&mut self, ptr: *mut u8) {
+        self.growth_end = ptr;
+    }
 
+    #[inline]
+    pub fn growth_limit(&mut self) -> *mut u8 {
+        self.growth_end
+    }
     pub fn create(_name: &'static str, mut capacity: usize) -> Self {
         capacity = round_up(capacity as _, 4096) as usize;
         let mem_map = Mmap::new(capacity);
