@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     intrinsics::{likely, unlikely},
     mem::size_of,
-    ptr::{null_mut, NonNull},
+    ptr::NonNull,
 };
 
 use crate::{
@@ -13,7 +13,10 @@ use crate::{
     bitmap::ObjectStartBitmap,
     bump_pointer_space::{align_usize, is_aligned, BumpPointerSpace},
     large_space::{LargeObjectSpace, PreciseAllocation},
-    util::{formatted_size, stack::get_stack_bounds_for_trace},
+    util::{
+        formatted_size,
+        stack::{approximate_stack_pointer, get_stack_bounds_for_trace},
+    },
 };
 
 pub const VERBOSE: bool = cfg!(feature = "minimark-verbose");
@@ -293,7 +296,7 @@ impl MiniMarkGC {
                         }
                     }
                 }
-
+                assert!(!mi_is_in_heap_region((*obj).vtable() as _));
                 if (*obj).marked_bit() {
                     return;
                 }
@@ -303,14 +306,14 @@ impl MiniMarkGC {
                 }
                 self.surviving_pinned_objects.push(obj as _);
                 self.pinned_objects_in_nursery += 1;
-                debug_assert!((*obj).size() != 0);
+                assert!((*obj).size() != 0);
                 self.mark_stack.push(obj);
                 return;
             }
             let vtable = (*obj).vtable();
             let size = (*obj).size();
             let newobj = self.malloc_out_of_nursery(obj);
-
+            assert!(!mi_is_in_heap_region((*obj).vtable() as _));
             core::ptr::copy_nonoverlapping(obj.cast::<u8>(), newobj.cast::<u8>(), size);
             (*newobj).unmark();
             (*obj).set_forwarded(newobj as _);
@@ -345,7 +348,7 @@ impl MiniMarkGC {
                     let hdr = self.bitmap.find_header(addr as _);
                     (*hdr).set_pinned_bit(true);
                     if VERBOSE || VERBOSE_LIGHT {
-                        println!(
+                        eprintln!(
                             "- found {:p} conservatively at {:p} (initial pointer {:p}, vtable {:x})",
                             hdr, cursor, ptr, (*hdr).vtable()
                         );
@@ -382,7 +385,6 @@ impl MiniMarkGC {
         self.los.begin_marking(false);
         if self.conservative {
             self.los.prepare_for_conservative_scan();
-
             self.find_conservatively_young(cursor, end);
         }
         for ref_ in keep {
@@ -476,7 +478,7 @@ impl MiniMarkGC {
                 );
                 let free_range_size = cur as usize - prev as usize;
                 // zero free memory
-                //core::ptr::write_bytes(prev, 0, free_range_size);
+                core::ptr::write_bytes(prev, 0, free_range_size);
                 self.bitmap.set_bit(object as _);
                 survived_bytes += (*cur).size();
                 (*cur).unmark();
@@ -522,9 +524,9 @@ impl MiniMarkGC {
             );
         }
     }
-    fn find_conservatively_old(&mut self) {
-        let (mut cursor, end) = get_stack_bounds_for_trace();
-
+    fn find_conservatively_old(&mut self, sp: *mut u8) {
+        let (mut cursor, _) = get_stack_bounds_for_trace();
+        let end = sp.cast();
         if VERBOSE {
             println!("Start old space conservative scan");
         }
@@ -536,8 +538,11 @@ impl MiniMarkGC {
                     cursor = cursor.add(1);
                     continue;
                 }
+
                 if libmimalloc_sys::mi_is_in_heap_region(pointer.cast()) {
-                    if libmimalloc_sys::mi_heap_contains_block(mi_heap, pointer.cast()) {
+                    if libmimalloc_sys::mi_heap_check_owned(mi_heap, pointer.cast())
+                        && libmimalloc_sys::mi_heap_contains_block(mi_heap, pointer.cast())
+                    {
                         let header = pointer.cast::<HeapObjectHeader>();
                         if !self.is_marked_old(header) {
                             self.mark_old(header);
@@ -566,52 +571,43 @@ impl MiniMarkGC {
             }
         }
     }
-
+    #[inline(never)]
     fn major_collection_(&mut self, keep: &mut [&mut dyn Trace]) {
+        let sp = approximate_stack_pointer();
         if VERBOSE || VERBOSE_LIGHT {
             eprintln!("MiniMark: Major collection");
         }
         self.los.prepare_for_marking(false);
         self.los.begin_marking(true);
-        self.los.prepare_for_conservative_scan();
+
         unsafe {
             while let Some(object) = self.remembered.pop() {
                 (*object).unmark();
             }
-            self.find_conservatively_old();
+            if self.conservative {
+                self.los.prepare_for_conservative_scan();
+                self.find_conservatively_old(sp.cast());
+            }
         }
 
         for ref_ in keep {
-            ref_.trace(&mut OldTrace {
-                gc: self,
-                parent: null_mut(),
-            });
+            ref_.trace(&mut OldTrace { gc: self });
         }
 
         let stack: &'static ShadowStack = unsafe { std::mem::transmute(&self.stack) };
 
         unsafe {
             stack.walk(|entry| {
-                entry.trace(&mut OldTrace {
-                    gc: self,
-                    parent: null_mut(),
-                });
+                entry.trace(&mut OldTrace { gc: self });
             });
 
             let mut tasks = std::mem::replace(&mut self.tasks, HashMap::new());
             for (_, task) in tasks.iter_mut() {
-                task.run(&mut OldTrace {
-                    gc: self,
-                    parent: null_mut(),
-                });
+                task.run(&mut OldTrace { gc: self });
             }
 
             while let Some(object) = self.mark_stack.pop() {
-                // println!("{:p} {:x}", object, (*object).vtable());
-                (*object).get_dyn().trace(&mut OldTrace {
-                    gc: self,
-                    parent: object,
-                });
+                (*object).get_dyn().trace(&mut OldTrace { gc: self });
             }
         }
         if !self.objects_with_finalizers.is_empty() {
@@ -672,14 +668,12 @@ impl MiniMarkGC {
 }
 struct OldTrace<'a> {
     gc: &'a mut MiniMarkGC,
-    parent: *mut HeapObjectHeader,
 }
 
 impl<'a> Visitor for OldTrace<'a> {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>) {
         if !self.gc.is_marked_old(root.as_ptr()) {
             self.gc.mark_old(root.as_ptr());
-
             self.gc.mark_stack.push(root.as_ptr());
         }
     }
@@ -697,7 +691,7 @@ impl<'a> Visitor for YoungTrace<'a> {
 
 use hashbrown::HashMap;
 use im::Vector;
-use libmimalloc_sys::{mi_heap_area_t, mi_heap_t};
+use libmimalloc_sys::{mi_heap_area_t, mi_heap_t, mi_is_in_heap_region};
 
 struct OldSpace {
     heap: *mut mi_heap_t,

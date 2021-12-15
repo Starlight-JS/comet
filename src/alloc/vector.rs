@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    api::{Collectable, Finalize, Gc, Trace, WriteBarrier},
+    api::{Collectable, Finalize, Gc, Trace},
     base::GcBase,
 };
 

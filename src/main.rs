@@ -1,102 +1,75 @@
-use comet::{
-    api::{Collectable, Finalize, Gc, Trace},
-    base::GcBase,
-    letroot,
-    minimark::MiniMarkGC,
-    util::formatted_size,
-};
+use comet::{base::GcBase, letroot, minimark::MiniMarkGC};
 
-#[repr(C)]
-pub struct Node {
-    left: Option<Gc<Node>>,
-    right: Option<Gc<Node>>,
+pub struct Tree {
+    first: Option<comet::api::Gc<Self>>,
+    second: Option<comet::api::Gc<Self>>,
 }
-
-unsafe impl Trace for Node {
-    fn trace(&mut self, _vis: &mut dyn comet::api::Visitor) {
-        self.left.trace(_vis);
-        self.right.trace(_vis);
-    }
-}
-
-unsafe impl Finalize for Node {}
-impl Collectable for Node {}
-
-#[inline]
-fn bottom_up_tree(heap: &mut MiniMarkGC, depth: i32, allocated: &mut usize) -> Gc<Node> {
-    if depth <= 0 {
-        *allocated += 1;
-        return heap.allocate(Node {
-            right: None,
-            left: None,
-        });
-    }
-    let stack = heap.shadow_stack();
-    letroot!(left = stack, bottom_up_tree(heap, depth - 1, allocated));
-    letroot!(right = stack, bottom_up_tree(heap, depth - 1, allocated));
-    *allocated += 1;
-    heap.allocate(Node {
-        left: Some(*left),
-        right: Some(*right),
-    })
-}
-
-impl Node {
+impl Tree {
     pub fn item_check(&self) -> i32 {
-        if self.left.is_none() {
+        if self.first.is_none() {
             return 1;
         }
-        1 + self.left.unwrap().item_check() + self.right.unwrap().item_check()
+        1 + self.first.unwrap().item_check() + self.second.unwrap().item_check()
     }
 }
-enum List {
-    None,
-    Some { value: i64, next: Gc<Self> },
-}
-
-unsafe impl Trace for List {
-    fn trace(&mut self, _vis: &mut dyn comet::api::Visitor) {
-        match self {
-            Self::Some { next, .. } => next.trace(_vis),
-            _ => (),
-        }
+unsafe impl comet::api::Trace for Tree {
+    fn trace(&mut self, vis: &mut dyn comet::api::Visitor) {
+        self.first.trace(vis);
+        self.second.trace(vis);
     }
 }
-unsafe impl Finalize for List {}
+unsafe impl comet::api::Finalize for Tree {}
 
-impl Collectable for List {}
+impl comet::api::Collectable for Tree {}
+
+pub fn bottom_up_tree(heap: &mut MiniMarkGC, mut depth: i32) -> comet::api::Gc<Tree> {
+    if depth > 0 {
+        depth -= 1;
+        let stack = heap.shadow_stack();
+        letroot!(first = stack, bottom_up_tree(heap, depth));
+        letroot!(second = stack, bottom_up_tree(heap, depth));
+        heap.allocate(Tree {
+            first: Some(*first),
+            second: Some(*second),
+        })
+    } else {
+        heap.allocate(Tree {
+            first: None,
+            second: None,
+        })
+    }
+}
+
+pub fn bottom_up_tree_wostack(heap: &mut MiniMarkGC, mut depth: i32) -> comet::api::Gc<Tree> {
+    if depth > 0 {
+        depth -= 1;
+
+        let first = bottom_up_tree_wostack(heap, depth);
+        let second = bottom_up_tree_wostack(heap, depth);
+        heap.allocate(Tree {
+            first: Some(first),
+            second: Some(second),
+        })
+    } else {
+        heap.allocate(Tree {
+            first: None,
+            second: None,
+        })
+    }
+}
+
 fn main() {
-    let mut heap = MiniMarkGC::new(Some(64 * 1024 * 1024), None, None, !true);
-    let stretch_depth = 19;
+    let mut heap = MiniMarkGC::new(None, None, None, !false);
+    let min_depth = 4;
+    let max_depth = 18;
+    let mut depth = min_depth;
+    while depth < max_depth {
+        let iterations = 1 << (max_depth - depth + min_depth);
 
-    let stack = heap.shadow_stack();
-    /*let mut n = 0;
-    letroot!(
-        tree = stack,
-        bottom_up_tree(&mut *heap, stretch_depth, &mut n)
-    );
-    /*for depth in 6..16 {
-        let iterations = 1 << (16 - depth + 4);
         for _ in 0..iterations {
-            bottom_up_tree(&mut *heap, depth, &mut n);
+            bottom_up_tree(&mut *heap, depth).item_check();
         }
-        println!("{} trees of depth {}", iterations, depth);
-    }*/
-    //heap.full_collection(&mut []);
-    println!("{:p} {:p}", *tree, &tree);
-    println!("approximate heap size: {}", formatted_size(n * 32));*/
-    letroot!(list = stack, heap.allocate(List::None));
-    let start = std::time::Instant::now();
-    let mut i = 0;
-    while i < 500_000_000 {
-        *list = heap.allocate(List::Some {
-            value: 42,
-            next: *list,
-        });
-        if i % 8192 == 0 {
-            *list = heap.allocate(List::None);
-        }
-        i += 1;
+
+        depth += 2;
     }
-    println!("{}", start.elapsed().as_millis());
 }

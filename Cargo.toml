@@ -29,3 +29,12 @@ winapi = { version = "0.3", features = [
 [features]
 minimark-verbose = []
 minimark-verbose-light = []
+
+[dev-dependencies]
+criterion = "0.3"
+gc = "0.4"
+gc_derive = "0.4"
+
+[[bench]]
+name = "binary_trees"
+harness = false

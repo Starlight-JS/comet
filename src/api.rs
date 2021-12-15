@@ -27,6 +27,7 @@ pub unsafe trait Finalize {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct HeapObjectHeader {
     pub value: u64,
 
@@ -40,11 +41,11 @@ pub const MIN_ALLOCATION: usize = 8;
 impl HeapObjectHeader {
     #[inline]
     pub fn set_free(&mut self) {
-        self.value = VTableBitField::update(self.value, 0);
+        self.type_id = 0;
     }
     #[inline]
     pub fn is_free(&self) -> bool {
-        self.vtable() == 0
+        self.type_id == 0
     }
     #[inline(always)]
     pub fn get_dyn(&mut self) -> &mut dyn Collectable {
