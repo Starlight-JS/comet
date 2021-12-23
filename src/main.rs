@@ -27,45 +27,35 @@ impl Collectable for Node {}
 
 fn main() {
     // 1GB Mark&Sweep space. First GC will happen at 256MB memory usage
-    let ms_mutator = comet_multi::marksweep::instantiate_marksweep::<false, false>(
-        256 * 1024 * 1024,
-        MS_DEFAULT_MAXIMUM_SIZE * 4,
-        256 * 1024 * 1024,
-        512 * 1024 * 1024,
+    let mut ms_mutator = comet_multi::marksweep::instantiate_marksweep::<false, false>(
+        1 * 1024 * 1024,
+        16 * 1024 * 1024,
+        1 * 1024 * 1024,
+        8 * 1024 * 1024,
         2.0,
-        MS_DEFAULT_MAXIMUM_SIZE * 4,
+        32 * 1024 * 1024,
         false,
     );
 
-    let mut handles = vec![];
-    println!("Will allocate {}", formatted_size(500_000_000 * 32));
-    for _ in 0..2 {
-        handles.push(ms_mutator.spawn_mutator(|mut ms_mutator| {
-            let stack = ms_mutator.shadow_stack();
-            letroot!(list = stack, ms_mutator.allocate(Node::None));
-            let mut i = 0;
-            let mut j = 0;
-            while i < 500_000_000 {
-                *list = ms_mutator.allocate(Node::Some {
-                    value: j + 1,
-                    next: *list,
-                });
+    let stack = ms_mutator.shadow_stack();
+    letroot!(list = stack, ms_mutator.allocate(Node::None));
+    let mut i = 0;
+    let mut j = 0;
+    let x = std::time::Instant::now();
+    while i < 50_000_000 {
+        *list = ms_mutator.allocate(Node::Some {
+            value: j + 1,
+            next: *list,
+        });
 
-                j += 1;
-                if i % 8192 == 0 {
-                    *list = ms_mutator.allocate(Node::None);
-                    j = 0;
-                }
-                if i % 100_000_000 == 0 {
-                    println!("{:?}: Wow!", std::thread::current().id());
-                }
-                i += 1;
-            }
-            println!("{:?}: Finished", std::thread::current().id());
-        }));
+        j += 1;
+        if i % 30000 == 0 {
+            *list = ms_mutator.allocate(Node::None);
+            j = 0;
+        }
+
+        i += 1;
     }
 
-    for handle in handles {
-        handle.join(&ms_mutator);
-    }
+    println!("{}", x.elapsed().as_millis());
 }
