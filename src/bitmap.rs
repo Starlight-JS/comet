@@ -1,6 +1,6 @@
 use crate::api::HeapObjectHeader;
 use crate::api::MIN_ALLOCATION;
-use crate::util::mmap::Mmap;
+use crate::utils::mmap::Mmap;
 use atomic::Atomic;
 use atomic::Ordering;
 use core::fmt;
@@ -8,7 +8,9 @@ use std::mem::size_of;
 use std::ptr::null_mut;
 #[inline(always)]
 pub const fn round_down(x: u64, n: u64) -> u64 {
-    x & !n
+    let x = x as i64;
+    let n = n as i64;
+    (x & -n) as _
 }
 
 #[inline(always)]
@@ -502,8 +504,7 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
 
                     if cur_pointer >= pointer_end {
                         callback(
-                            cur_pointer as usize
-                                - &pointer_buf[0] as *const *mut HeapObjectHeader as usize,
+                            cur_pointer.offset_from(&pointer_buf[0]) as _,
                             &mut pointer_buf[0],
                         );
                         cur_pointer = &mut pointer_buf[0];
@@ -513,7 +514,7 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
 
             if cur_pointer > &mut pointer_buf[0] as *mut *mut HeapObjectHeader {
                 callback(
-                    cur_pointer as usize - &pointer_buf[0] as *const *mut HeapObjectHeader as usize,
+                    cur_pointer.offset_from(&pointer_buf[0]) as _,
                     &mut pointer_buf[0],
                 );
             }

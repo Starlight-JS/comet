@@ -1,75 +1,71 @@
-use comet::{base::GcBase, letroot, minimark::MiniMarkGC};
+use comet_multi::{
+    api::{Collectable, Finalize, Gc, Trace},
+    letroot,
+    marksweep::*,
+    mutator::MutatorRef,
+    utils::formatted_size,
+};
 
-pub struct Tree {
-    first: Option<comet::api::Gc<Self>>,
-    second: Option<comet::api::Gc<Self>>,
+pub enum Node {
+    None,
+    Some { value: i64, next: Gc<Node> },
 }
-impl Tree {
-    pub fn item_check(&self) -> i32 {
-        if self.first.is_none() {
-            return 1;
+
+unsafe impl Trace for Node {
+    fn trace(&mut self, vis: &mut dyn comet_multi::api::Visitor) {
+        match self {
+            Self::Some { next, value } => {
+                next.trace(vis);
+            }
+            _ => (),
         }
-        1 + self.first.unwrap().item_check() + self.second.unwrap().item_check()
-    }
-}
-unsafe impl comet::api::Trace for Tree {
-    fn trace(&mut self, vis: &mut dyn comet::api::Visitor) {
-        self.first.trace(vis);
-        self.second.trace(vis);
-    }
-}
-unsafe impl comet::api::Finalize for Tree {}
-
-impl comet::api::Collectable for Tree {}
-
-pub fn bottom_up_tree(heap: &mut MiniMarkGC, mut depth: i32) -> comet::api::Gc<Tree> {
-    if depth > 0 {
-        depth -= 1;
-        let stack = heap.shadow_stack();
-        letroot!(first = stack, bottom_up_tree(heap, depth));
-        letroot!(second = stack, bottom_up_tree(heap, depth));
-        heap.allocate(Tree {
-            first: Some(*first),
-            second: Some(*second),
-        })
-    } else {
-        heap.allocate(Tree {
-            first: None,
-            second: None,
-        })
     }
 }
 
-pub fn bottom_up_tree_wostack(heap: &mut MiniMarkGC, mut depth: i32) -> comet::api::Gc<Tree> {
-    if depth > 0 {
-        depth -= 1;
-
-        let first = bottom_up_tree_wostack(heap, depth);
-        let second = bottom_up_tree_wostack(heap, depth);
-        heap.allocate(Tree {
-            first: Some(first),
-            second: Some(second),
-        })
-    } else {
-        heap.allocate(Tree {
-            first: None,
-            second: None,
-        })
-    }
-}
+unsafe impl Finalize for Node {}
+impl Collectable for Node {}
 
 fn main() {
-    let mut heap = MiniMarkGC::new(None, None, None, !false);
-    let min_depth = 4;
-    let max_depth = 18;
-    let mut depth = min_depth;
-    while depth < max_depth {
-        let iterations = 1 << (max_depth - depth + min_depth);
+    // 1GB Mark&Sweep space. First GC will happen at 256MB memory usage
+    let ms_mutator = comet_multi::marksweep::instantiate_marksweep::<false, false>(
+        256 * 1024 * 1024,
+        MS_DEFAULT_MAXIMUM_SIZE * 4,
+        256 * 1024 * 1024,
+        512 * 1024 * 1024,
+        2.0,
+        MS_DEFAULT_MAXIMUM_SIZE * 4,
+        false,
+    );
 
-        for _ in 0..iterations {
-            bottom_up_tree(&mut *heap, depth).item_check();
-        }
+    let mut handles = vec![];
+    println!("Will allocate {}", formatted_size(500_000_000 * 32));
+    for _ in 0..2 {
+        handles.push(ms_mutator.spawn_mutator(|mut ms_mutator| {
+            let stack = ms_mutator.shadow_stack();
+            letroot!(list = stack, ms_mutator.allocate(Node::None));
+            let mut i = 0;
+            let mut j = 0;
+            while i < 500_000_000 {
+                *list = ms_mutator.allocate(Node::Some {
+                    value: j + 1,
+                    next: *list,
+                });
 
-        depth += 2;
+                j += 1;
+                if i % 8192 == 0 {
+                    *list = ms_mutator.allocate(Node::None);
+                    j = 0;
+                }
+                if i % 100_000_000 == 0 {
+                    println!("{:?}: Wow!", std::thread::current().id());
+                }
+                i += 1;
+            }
+            println!("{:?}: Finished", std::thread::current().id());
+        }));
+    }
+
+    for handle in handles {
+        handle.join(&ms_mutator);
     }
 }

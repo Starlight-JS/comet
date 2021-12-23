@@ -1,8 +1,8 @@
-use comet::minimark::MiniMarkGC;
+//use comet::minimark::MiniMarkGC;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 pub fn bench_gcs(c: &mut Criterion) {
-    let mut group = c.benchmark_group("binary trees");
+    /*  let mut group = c.benchmark_group("binary trees");
     group.sample_size(50);
     let n = 12;
 
@@ -68,12 +68,13 @@ pub fn bench_gcs(c: &mut Criterion) {
         });
     }
 
-    group.finish();
+    group.finish();*/
 }
 
 criterion_group!(benches, bench_gcs);
 criterion_main!(benches);
 
+/*
 mod comet_tree {
     use comet::{base::GcBase, letroot, minimark::MiniMarkGC};
 
@@ -175,3 +176,4 @@ mod rust_gc_tree {
         }
     }
 }
+*/

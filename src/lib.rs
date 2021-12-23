@@ -1,37 +1,28 @@
-#![feature(core_intrinsics, const_type_id, is_sorted, backtrace)]
+#![feature(new_uninit, const_type_id)]
 #[macro_use]
-pub mod util;
+pub mod shadow_stack;
 #[macro_use]
+pub mod utils;
+pub mod alloc;
 pub mod api;
 pub mod bitmap;
-use std::{any::TypeId, ptr::null_mut};
-
-use api::{Collectable, Gc};
-pub use mopa;
-pub mod alloc;
-pub mod base;
 pub mod bump_pointer_space;
+pub mod gc_base;
+pub mod immix;
 pub mod large_space;
+pub mod marksweep;
 pub mod minimark;
-pub mod miri_stack;
 pub mod mutator;
-pub mod page;
-pub mod segregated_space;
+pub mod rosalloc_space;
+pub mod safepoint;
 pub mod semispace;
 pub mod space;
-pub mod stack;
-#[cfg(test)]
-pub mod tests;
+pub mod tlab;
+pub mod waitlists;
+use std::any::TypeId;
 
-pub type Heap = minimark::MiniMarkGC;
+pub use mopa;
 
-pub fn alloc_i32(heap: &mut impl base::GcBase, x: i32) -> Gc<i32> {
-    heap.allocate(x)
-}
-
-pub fn is_i32(x: Gc<dyn Collectable>) -> bool {
-    x.is::<i32>()
-}
 const FNV_OFFSET_BASIS_32: u32 = 0x811c9dc5;
 
 const FNV_PRIME_32: u32 = 0x01000193;

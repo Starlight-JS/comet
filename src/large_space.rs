@@ -1,5 +1,5 @@
-use super::{api::*, *};
-use std::sync::atomic::AtomicBool;
+use super::api::*;
+use std::{ptr::null_mut, sync::atomic::AtomicBool};
 /// Precise allocation used for large objects (>= LARGE_CUTOFF).
 /// Starlight uses mimalloc that already knows what to do for large allocations. The GC shouldn't
 /// have to think about such things. That's where PreciseAllocation comes in. We will allocate large
@@ -299,9 +299,9 @@ impl LargeObjectSpace {
         }
     }
 
-    pub fn sweep(&mut self) {
+    pub fn sweep(&mut self) -> usize {
         let mut src_index = self.precise_allocations_offset_nursery_for_sweep;
-
+        let mut freed = 0;
         let mut dst_index = src_index;
         while src_index < self.allocations.len() {
             let allocation = self.allocations[src_index];
@@ -310,9 +310,7 @@ impl LargeObjectSpace {
                 (*allocation).sweep();
                 if (*allocation).is_empty() {
                     self.bytes -= (*allocation).cell_size();
-                    if super::minimark::VERBOSE {
-                        eprintln!("LargeObjectSpace: destroy {:p}", allocation);
-                    }
+                    freed += (*allocation).cell_size();
                     (*allocation).destroy();
 
                     continue;
@@ -327,6 +325,7 @@ impl LargeObjectSpace {
         }
         self.allocations.resize(dst_index, null_mut());
         self.precise_allocations_nursery_offset = self.allocations.len();
+        freed
     }
 
     pub fn allocate(&mut self, size: usize) -> *mut HeapObjectHeader {
