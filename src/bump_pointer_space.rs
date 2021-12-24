@@ -10,6 +10,12 @@ pub struct BumpPointerSpace {
 }
 
 impl BumpPointerSpace {
+    pub fn size(&self) -> usize {
+        self.mmap.size()
+    }
+    pub fn allocated(&self) -> usize {
+        self.cursor.load(atomic::Ordering::Relaxed) as usize - self.start as usize
+    }
     pub fn contains(&self, addr: *const u8) -> bool {
         addr >= self.start && addr < self.end
     }

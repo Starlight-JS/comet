@@ -13,7 +13,6 @@ use crate::{
 use atomic::Ordering;
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 use rosalloc::{Rosalloc, NUM_OF_SLOTS};
-
 use std::ptr::null_mut;
 use std::sync::atomic::AtomicUsize;
 use std::{cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc};
@@ -332,7 +331,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
             }
         }
     }
-    #[inline]
+    #[inline(always)]
     fn alloc_inline<T: Collectable + Sized + 'static>(
         &mut self,
         mutator: &mut MutatorRef<Self>,

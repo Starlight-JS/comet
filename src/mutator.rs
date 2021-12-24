@@ -214,7 +214,8 @@ impl<H: GcBase> MutatorRef<H> {
             let mut this = self.clone();
             if !this.tlab.refill(&self.clone(), size) {
                 // if tlab failed to be refilled we request GC cycle and try to get some memory
-                self.heap_ref().collect(self, &mut [&mut value]);
+                self.heap_ref()
+                    .collect_alloc_failure(self, &mut [&mut value]);
                 if !this.tlab.refill(&self, size) {
                     // if refilling again fails we just OOM
                     oom_abort();

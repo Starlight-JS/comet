@@ -12,8 +12,9 @@ ahash = "0.7"
 hashbrown = "0.11"
 atomic = "0.5"
 parking_lot = "0.11"
-rosalloc = { git = "https://github.com/playxe/rosalloc" }
-#rosalloc = { path = "rosalloc" }
+flume = "0.10"
+#rosalloc = { git = "https://github.com/playxe/rosalloc" }
+rosalloc = { path = "rosalloc" }
 im = "15.0"
 memx = "0.1"
 [target.'cfg(windows)'.dependencies]

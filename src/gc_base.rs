@@ -17,7 +17,9 @@ pub trait GcBase: Sized {
     fn get_rosalloc_space(&self) -> *mut RosAllocSpace {
         null_mut()
     }
-
+    fn collect_alloc_failure(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
+        self.collect(mutator, keep);
+    }
     fn attach_current_thread(&mut self, mutator: *mut Mutator<Self>);
     fn detach_current_thread(&mut self, mutator: *mut Mutator<Self>);
 
