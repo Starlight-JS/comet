@@ -22,6 +22,8 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ptr::{null_mut, NonNull};
 use std::sync::Arc;
+use threadfin::Task;
+use threadfin::ThreadPool;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GcReason {
@@ -42,6 +44,7 @@ pub struct Serial {
     verbose: bool,
 
     mark_stack: Vec<*mut HeapObjectHeader>,
+
     num_old_space_allocated: usize,
 
     total_gcs: usize,
@@ -54,6 +57,8 @@ pub struct Serial {
     min_heap_size: usize,
     growth_rate_max: f64,
     promoted: usize,
+    pool: threadfin::ThreadPool,
+    sweep_task: Option<Task<(f64, usize)>>,
 }
 
 pub struct SerialOptions {
@@ -130,6 +135,9 @@ impl Serial {
         );
 
         let mut this = Self {
+            sweep_task: None,
+            // atm only one concurrent sweep task is spawned
+            pool: ThreadPool::builder().size(1).stack_size(8 * 1024).build(),
             global_heap_lock: Lock::INIT,
             large_space_lock: Lock::INIT,
             large_space: LargeObjectSpace::new(),
@@ -245,9 +253,28 @@ impl Serial {
         } else {
             None
         };
-        let prev = self.nursery.allocated();
+        let (conc_sweep, bytes) = if let Some(sweep_task) = self.sweep_task.take() {
+            let (time, freed) = sweep_task.join();
+            let prev = self.num_old_space_allocated;
+            self.num_old_space_allocated -= freed;
+            if self.verbose {
+                eprintln!(
+                    "[gc] Concurrent sweep end: {}->{} {:.4}ms",
+                    formatted_size(prev),
+                    formatted_size(self.num_old_space_allocated),
+                    time
+                );
+            }
+            let total_bytes = self.num_old_space_allocated + self.large_space.bytes;
+            self.set_major_threshold_from(total_bytes as f64 * self.major_collection_threshold);
+            (false, prev)
+        } else {
+            (false, 0)
+        };
+
         self.large_space.prepare_for_marking(true);
         self.large_space.begin_marking(false);
+        (*(*self.old_space).rosalloc()).revoke_thread_unsafe_current_runs();
         keep.iter_mut().for_each(|item| {
             item.trace(&mut YoungVisitor {
                 serial: self,
@@ -282,8 +309,12 @@ impl Serial {
         }
         self.large_space.prepare_for_allocation(true);
         self.large_space.sweep();
-        self.nursery.reset();
 
+        self.nursery.reset();
+        if conc_sweep {
+            let total_bytes = bytes + self.large_space.bytes;
+            self.set_major_threshold_from(total_bytes as f64 * self.major_collection_threshold);
+        }
         if let Some(time) = time {
             let elapsed = time.elapsed();
             eprintln!(
@@ -306,6 +337,7 @@ impl Serial {
         } else {
             None
         };
+
         self.large_space.prepare_for_marking(false);
         self.large_space.begin_marking(true);
         keep.iter_mut().for_each(|item| {
@@ -328,21 +360,43 @@ impl Serial {
         while let Some(object) = self.mark_stack.pop() {
             (*object).get_dyn().trace(&mut OldVisitor { serial: self });
         }
-        let prev = self.num_old_space_allocated + self.large_space.bytes;
+        /*let prev = self.num_old_space_allocated + self.large_space.bytes;
         let (freed, _) = (*self.old_space).sweep(false, |pointers, _| {
             (*self.old_space).sweep_callback(pointers, false)
-        });
-        self.num_old_space_allocated -= freed;
+        });*/
+        //self.num_old_space_allocated -= freed;
         self.large_space.prepare_for_allocation(false);
         self.large_space.sweep();
-        let total_bytes = self.num_old_space_allocated + self.large_space.bytes;
-        self.set_major_threshold_from(total_bytes as f64 * self.major_collection_threshold);
+        /* self.set_major_threshold_from(
+            (self.num_old_space_allocated + self.large_space.bytes) as f64
+                * self.major_collection_threshold,
+        );*/
+
+        let rosalloc = self.old_space as usize;
+        self.sweep_task = Some(self.pool.execute(move || {
+            let start = std::time::Instant::now();
+            let rosalloc = rosalloc as *mut RosAllocSpace;
+            (*(*rosalloc).rosalloc()).revoke_thread_unsafe_current_runs();
+            eprintln!(
+                "[gc] Start concurrent sweep {:p}->{:p} {}",
+                (*rosalloc).begin(),
+                (*rosalloc).end(),
+                formatted_size((*rosalloc).end() as usize - (*rosalloc).begin() as usize)
+            );
+            let freed = (*rosalloc)
+                .sweep(false, |pointers, _| {
+                    (*rosalloc).sweep_callback(pointers, false)
+                })
+                .0;
+            (*(*rosalloc).rosalloc()).trim();
+            let elapsed = start.elapsed().as_micros() as f64 / 1000.0;
+            (elapsed, freed)
+        }));
         if let Some(time) = time {
             eprintln!(
-                "[gc] GC({}) Pause Old ({:?}) {}->{}({}) {:.4}ms",
+                "[gc] GC({}) Pause Old ({:?}) {}({}) {:.4}ms",
                 self.total_gcs,
                 reason,
-                formatted_size(prev),
                 formatted_size(self.num_old_space_allocated + self.large_space.bytes),
                 formatted_size(self.next_major_collection_threshold),
                 time.elapsed().as_micros() as f64 / 1000.0
@@ -363,6 +417,12 @@ impl Serial {
         }
         self.next_major_collection_initial = threshold as _;
         self.next_major_collection_threshold = threshold as _;
+        if self.verbose {
+            eprintln!(
+                "[gc] Major threshold set to {}",
+                formatted_size(self.next_major_collection_threshold)
+            );
+        }
     }
     #[inline(always)]
     unsafe fn write_barrier_internal(&mut self, object: *mut HeapObjectHeader) {

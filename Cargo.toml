@@ -11,7 +11,11 @@ libc = "0.2.98"
 ahash = "0.7"
 hashbrown = "0.11"
 atomic = "0.5"
+threadfin = "0.1"
 parking_lot = "0.11"
+scoped_threadpool = "0.1"
+crossbeam-deque = "0.8"
+rand = "0.8"
 flume = "0.10"
 #rosalloc = { git = "https://github.com/playxe/rosalloc" }
 rosalloc = { path = "rosalloc" }
@@ -29,4 +33,4 @@ winapi = { version = "0.3", features = [
     "wincrypt",
 ] }
 
-[features]
+[profile.release]

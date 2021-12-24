@@ -24,15 +24,16 @@ unsafe impl Finalize for Node {}
 impl Collectable for Node {}
 
 fn main() {
-    // 1GB Mark&Sweep space. First GC will happen at 256MB memory usage
-    /*let mut ms_mutator = comet_multi::marksweep::instantiate_marksweep::<false, false>(
-        1 * 1024 * 1024,
-        16 * 1024 * 1024,
-        1 * 1024 * 1024,
-        8 * 1024 * 1024,
+    /*// 1GB Mark&Sweep space. First GC will happen at 256MB memory usage
+    let mut ms_mutator = comet_multi::marksweep::instantiate_marksweep::<false, false>(
+        256 * 1024 * 1024,
+        1024 * 1024 * 1024,
+        256 * 1024 * 1024,
+        512 * 1024 * 1024,
         2.0,
-        32 * 1024 * 1024,
+        1024 * 1024 * 1024,
         false,
+        1,
     );
 
     let stack = ms_mutator.shadow_stack();
@@ -40,7 +41,7 @@ fn main() {
     let mut i = 0;
     let mut j = 0;
     let x = std::time::Instant::now();
-    while i < 500_000_000 {
+    while i < 50_000_000 {
         *list = ms_mutator.allocate(Node::Some {
             value: j + 1,
             next: *list,
@@ -59,7 +60,8 @@ fn main() {
 
     let mut options = SerialOptions::default();
     options.verbose = true;
-    options.nursery_size = 64 * 1024 * 1024;
+    options.nursery_size = 32 * 1024 * 1024;
+    // options.initial_size = 64 * 1024 * 1024;
     let mut mutator = serial::instantiate_serial(options);
     let stack = mutator.shadow_stack();
     letroot!(list = stack, mutator.allocate(Node::None));
@@ -74,7 +76,7 @@ fn main() {
         });
 
         j += 1;
-        if i % (8 * 1024) == 0 {
+        if i % 30000 == 0 {
             *list = mutator.allocate(Node::None);
             j = 0;
         }
