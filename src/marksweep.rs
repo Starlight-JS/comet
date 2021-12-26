@@ -427,7 +427,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
 
     fn allocate_large<T: Collectable + Sized + 'static>(
         &mut self,
-        _mutator: &MutatorRef<Self>,
+        _mutator: &mut MutatorRef<Self>,
         value: T,
     ) -> crate::api::Gc<T> {
         unsafe {

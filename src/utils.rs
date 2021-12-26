@@ -48,7 +48,7 @@ impl BitFieldTrait<1, 1> for ParentKnown {
     type Next = MarkBit;
 }
 
-impl BitFieldTrait<2, 1> for ForwardedBit {
+impl BitFieldTrait<3, 1> for ForwardedBit {
     type Next = MarkedBitField;
 }
 
@@ -67,6 +67,12 @@ impl BitFieldTrait<0, 13> for SizeBitField {
 pub struct MarkBit;
 
 impl BitFieldTrait<0, 1> for MarkBit {
+    type Next = Self;
+}
+
+pub struct ColourBit;
+
+impl BitFieldTrait<0, 2> for ColourBit {
     type Next = Self;
 }
 use std::fmt;

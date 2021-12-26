@@ -14,9 +14,12 @@ use crate::{
     rosalloc_space::RosAllocSpace,
     utils::formatted_size,
 };
+//use atomic::Atomic;
 use atomic::Ordering;
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
+//use rosalloc::defs::NUM_THREAD_LOCAL_SIZE_BRACKETS;
 use rosalloc::Rosalloc;
+//use rosalloc::Run;
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -32,7 +35,30 @@ enum GcReason {
     OldSpaceFull,
 }
 
-pub struct Serial {
+/// Generational almost concurrent collector. This GC divides heap into two generations: nursery and old.
+///
+/// To collect garbage it implements two GC cycle types:
+/// ## Minor
+///
+/// Simple scavenging operation that copies surviving young object to old space. When minor cycle starts
+/// it waits for background concurrent sweeper task to finish in order to allocate objects in old space.
+///
+/// ## Major
+///
+/// Mark&Sweep with concurrent sweeping enabled.
+///
+///
+/// # Spaces
+///
+/// ## Nursery
+///
+/// Bump pointer space that allows for TLAB blocks allocation. Not variable in size and always stays the same.
+///
+/// ## Old
+///
+/// Old space uses [rosalloc](https://github.com/playXE/rosalloc) for allocation.
+///
+pub struct GenCon {
     nursery: BumpPointerSpace,
     pub(crate) global_heap_lock: Lock,
     pub(crate) large_space_lock: Lock,
@@ -61,7 +87,7 @@ pub struct Serial {
     sweep_task: Option<Task<(f64, usize)>>,
 }
 
-pub struct SerialOptions {
+pub struct GenConOptions {
     pub verbose: bool,
     pub nursery_size: usize,
     pub initial_size: usize,
@@ -72,7 +98,7 @@ pub struct SerialOptions {
     pub growth_rate_max: f64,
 }
 
-impl Default for SerialOptions {
+impl Default for GenConOptions {
     fn default() -> Self {
         Self {
             verbose: false,
@@ -87,8 +113,8 @@ impl Default for SerialOptions {
     }
 }
 
-pub fn instantiate_serial(options: SerialOptions) -> MutatorRef<Serial> {
-    let heap = Arc::new(UnsafeCell::new(Serial::new(
+pub fn instantiate_gencon(options: GenConOptions) -> MutatorRef<GenCon> {
+    let heap = Arc::new(UnsafeCell::new(GenCon::new(
         options.verbose,
         Some(options.nursery_size),
         options.initial_size,
@@ -113,7 +139,7 @@ pub fn instantiate_serial(options: SerialOptions) -> MutatorRef<Serial> {
     mutator
 }
 
-impl Serial {
+impl GenCon {
     fn new(
         verbose: bool,
         nursery_size: Option<usize>,
@@ -167,6 +193,41 @@ impl Serial {
         this.set_major_threshold_from(0.0);
         this
     }
+    #[allow(dead_code)]
+    fn wait_for_gc_to_complete_locked(&mut self) -> bool {
+        /* let did_gc = if let Some(task) = self.gc_task.take() {
+            let (time, sweeped) = task.join();
+            let prev = self.num_old_space_allocated;
+            self.num_old_space_allocated -= sweeped;
+            if self.verbose {
+                eprintln!(
+                    "[gc] Concurrent GC end: {}->{} {:.4}ms",
+                    formatted_size(prev),
+                    formatted_size(self.num_old_space_allocated),
+                    time
+                );
+            }
+            let total_bytes = self.num_old_space_allocated + self.large_space.bytes;
+            self.set_major_threshold_from(total_bytes as f64 * self.major_collection_threshold);
+            true
+        } else {
+            false
+        };
+
+        did_gc*/
+        return false;
+    }
+    fn wait_for_gc_to_complete(&mut self) -> bool {
+        /*self.large_space_lock.lock();
+        self.gc_task_lock.lock();
+        let did_gc = self.wait_for_gc_to_complete_locked();
+        unsafe {
+            self.large_space_lock.unlock();
+            self.gc_task_lock.unlock();
+        }
+        did_gc*/
+        return false;
+    }
 
     unsafe fn trace_drag_out(
         &mut self,
@@ -213,6 +274,7 @@ impl Serial {
                     (*object).set_forwarded(memory as _);
                     *root = NonNull::new_unchecked(memory.cast());
                 }
+
                 // incremase num_old_space_allocated. If at the end of minor collection it is larger than target footprint we perform major collection
                 self.num_old_space_allocated += tl_bulk_allocated;
                 self.mark_stack.push(memory.cast());
@@ -240,9 +302,7 @@ impl Serial {
             if !(*(*self.old_space).get_mark_bitmap()).set(object.cast()) {
                 self.mark_stack.push(object);
             }
-        } else if self.nursery.contains(object.cast()) {
-            // todo: support for conservative scanning means nursery objects might be found in major collections
-            // add mark bitmap for nursery so we can work with them properly.
+        } else {
         }
     }
 
@@ -253,7 +313,7 @@ impl Serial {
         } else {
             None
         };
-        let (conc_sweep, bytes) = if let Some(sweep_task) = self.sweep_task.take() {
+        if let Some(sweep_task) = self.sweep_task.take() {
             let (time, freed) = sweep_task.join();
             let prev = self.num_old_space_allocated;
             self.num_old_space_allocated -= freed;
@@ -266,18 +326,16 @@ impl Serial {
                 );
             }
             let total_bytes = self.num_old_space_allocated + self.large_space.bytes;
+
             self.set_major_threshold_from(total_bytes as f64 * self.major_collection_threshold);
-            (false, prev)
-        } else {
-            (false, 0)
-        };
+        }
 
         self.large_space.prepare_for_marking(true);
         self.large_space.begin_marking(false);
-        (*(*self.old_space).rosalloc()).revoke_thread_unsafe_current_runs();
+
         keep.iter_mut().for_each(|item| {
             item.trace(&mut YoungVisitor {
-                serial: self,
+                gencon: self,
                 parent_object: null_mut(),
             });
         });
@@ -287,7 +345,7 @@ impl Serial {
             (*mutator).reset_tlab();
             (*mutator).shadow_stack().walk(|var| {
                 var.trace(&mut YoungVisitor {
-                    serial: self,
+                    gencon: self,
                     parent_object: null_mut(),
                 });
             });
@@ -295,7 +353,7 @@ impl Serial {
 
         while let Some(object) = self.remembered_set.pop() {
             (*object).get_dyn().trace(&mut YoungVisitor {
-                serial: self,
+                gencon: self,
                 parent_object: object,
             });
             (*object).unmark();
@@ -303,7 +361,7 @@ impl Serial {
 
         while let Some(object) = self.mark_stack.pop() {
             (*object).get_dyn().trace(&mut YoungVisitor {
-                serial: self,
+                gencon: self,
                 parent_object: object,
             });
         }
@@ -311,10 +369,10 @@ impl Serial {
         self.large_space.sweep();
 
         self.nursery.reset();
-        if conc_sweep {
+        /*if conc_sweep {
             let total_bytes = bytes + self.large_space.bytes;
             self.set_major_threshold_from(total_bytes as f64 * self.major_collection_threshold);
-        }
+        }*/
         if let Some(time) = time {
             let elapsed = time.elapsed();
             eprintln!(
@@ -338,10 +396,8 @@ impl Serial {
             None
         };
 
-        self.large_space.prepare_for_marking(false);
-        self.large_space.begin_marking(true);
         keep.iter_mut().for_each(|item| {
-            item.trace(&mut OldVisitor { serial: self });
+            item.trace(&mut OldVisitor { gencon: self });
         });
 
         for i in 0..self.mutators.len() {
@@ -349,47 +405,38 @@ impl Serial {
             (*mutator).reset_tlab();
             (*mutator)
                 .shadow_stack()
-                .walk(|var| var.trace(&mut OldVisitor { serial: self }));
+                .walk(|var| var.trace(&mut OldVisitor { gencon: self }));
         }
 
         while let Some(object) = self.remembered_set.pop() {
-            (*object).get_dyn().trace(&mut OldVisitor { serial: self });
+            (*object).get_dyn().trace(&mut OldVisitor { gencon: self });
             (*object).unmark();
         }
 
         while let Some(object) = self.mark_stack.pop() {
-            (*object).get_dyn().trace(&mut OldVisitor { serial: self });
+            (*object).get_dyn().trace(&mut OldVisitor { gencon: self });
         }
-        /*let prev = self.num_old_space_allocated + self.large_space.bytes;
-        let (freed, _) = (*self.old_space).sweep(false, |pointers, _| {
-            (*self.old_space).sweep_callback(pointers, false)
-        });*/
-        //self.num_old_space_allocated -= freed;
+
         self.large_space.prepare_for_allocation(false);
         self.large_space.sweep();
-        /* self.set_major_threshold_from(
-            (self.num_old_space_allocated + self.large_space.bytes) as f64
-                * self.major_collection_threshold,
-        );*/
 
         let rosalloc = self.old_space as usize;
         self.sweep_task = Some(self.pool.execute(move || {
             let start = std::time::Instant::now();
             let rosalloc = rosalloc as *mut RosAllocSpace;
             (*(*rosalloc).rosalloc()).revoke_thread_unsafe_current_runs();
-            eprintln!(
-                "[gc] Start concurrent sweep {:p}->{:p} {}",
-                (*rosalloc).begin(),
-                (*rosalloc).end(),
-                formatted_size((*rosalloc).end() as usize - (*rosalloc).begin() as usize)
-            );
+
             let freed = (*rosalloc)
                 .sweep(false, |pointers, _| {
                     (*rosalloc).sweep_callback(pointers, false)
                 })
                 .0;
             (*(*rosalloc).rosalloc()).trim();
+
+            (*rosalloc).swap_bitmaps();
+            (*(*rosalloc).get_mark_bitmap()).clear_all();
             let elapsed = start.elapsed().as_micros() as f64 / 1000.0;
+
             (elapsed, freed)
         }));
         if let Some(time) = time {
@@ -456,36 +503,36 @@ fn promotion_oom(size: usize, object: *const u8) -> ! {
 }
 
 pub struct YoungVisitor<'a> {
-    serial: &'a mut Serial,
+    gencon: &'a mut GenCon,
     parent_object: *mut HeapObjectHeader,
 }
 
 impl<'a> Visitor for YoungVisitor<'a> {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>) {
         unsafe {
-            self.serial.trace_drag_out(root, self.parent_object);
+            self.gencon.trace_drag_out(root, self.parent_object);
         }
     }
 }
 
 pub struct OldVisitor<'a> {
-    serial: &'a mut Serial,
+    gencon: &'a mut GenCon,
 }
 
 impl<'a> Visitor for OldVisitor<'a> {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>) {
         unsafe {
-            self.serial.trace(root);
+            self.gencon.trace(root);
         }
     }
 }
 
-impl GcBase for Serial {
+impl GcBase for GenCon {
     type TLAB = SimpleTLAB<Self>;
     const SUPPORTS_TLAB: bool = true;
     const LARGE_ALLOCATION_SIZE: usize = 16 * 1024;
     #[inline]
-    fn write_barrier(&mut self, object: Gc<dyn crate::api::Collectable>) {
+    fn write_barrier(&mut self, _: &mut MutatorRef<Self>, object: Gc<dyn crate::api::Collectable>) {
         unsafe {
             self.write_barrier_internal(object.base.as_ptr());
         }
@@ -529,6 +576,9 @@ impl GcBase for Serial {
     }
     fn full_collection(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
         unsafe {
+            let s = mutator.enter_unsafe();
+            self.wait_for_gc_to_complete();
+            drop(s);
             match SafepointScope::new(mutator.clone()) {
                 Some(safepoint) => {
                     self.global_heap_lock.lock();
@@ -536,7 +586,6 @@ impl GcBase for Serial {
                     self.large_space_lock.lock();
                     self.minor(keep, GcReason::RequestedByUser);
                     self.major(keep, GcReason::RequestedByUser);
-
                     drop(safepoint);
                     self.global_heap_lock.unlock();
                     self.rem_set_lock.unlock();
@@ -549,6 +598,9 @@ impl GcBase for Serial {
 
     fn minor_collection(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
         unsafe {
+            let s = mutator.enter_unsafe();
+            self.wait_for_gc_to_complete();
+            drop(s);
             match SafepointScope::new(mutator.clone()) {
                 Some(safepoint) => {
                     self.global_heap_lock.lock();
@@ -586,12 +638,20 @@ impl GcBase for Serial {
             let hdr = memory.cast::<HeapObjectHeader>();
             (*hdr).set_vtable(vtable_of::<T>());
             (*hdr).set_size(size);
+
             ((*hdr).data() as *mut T).write(value);
             Gc {
                 base: NonNull::new_unchecked(hdr),
                 marker: Default::default(),
             }
         }
+    }
+    #[inline(always)]
+    fn post_alloc<T: crate::api::Collectable + Sized + 'static>(&mut self, _value: Gc<T>) {
+        /*unsafe {
+            let hdr = value.base.as_ptr();
+            (*hdr).force_set_color(GC_WHITE);
+        }*/
     }
     fn alloc_tlab_area(&mut self, _mutator: &MutatorRef<Self>, _size: usize) -> *mut u8 {
         self.nursery.bump_alloc(32 * 1024)
@@ -644,7 +704,7 @@ impl GcBase for Serial {
     }
     fn allocate_large<T: crate::api::Collectable + Sized + 'static>(
         &mut self,
-        _mutator: &MutatorRef<Self>,
+        _mutator: &mut MutatorRef<Self>,
         value: T,
     ) -> crate::api::Gc<T> {
         unsafe {
@@ -664,3 +724,16 @@ impl GcBase for Serial {
         }
     }
 }
+
+/*
+pub struct GenConTLAB {
+    heap: Arc<UnsafeCell<GenCon>>,
+    tlab_start: *mut u8,
+    tlab_cursor: *mut u8,
+    tlab_end: *mut u8,
+    // used for promotion
+    runs: [*mut Run; NUM_THREAD_LOCAL_SIZE_BRACKETS],
+}
+
+impl GenConTLAB {}
+*/

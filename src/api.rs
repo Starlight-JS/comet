@@ -3,9 +3,11 @@ use std::{
     mem::{size_of, MaybeUninit},
     ops::{Deref, DerefMut},
     ptr::{null_mut, NonNull},
+    sync::atomic::AtomicU16,
 };
 
 use crate::{large_space::PreciseAllocation, small_type_id, utils::*};
+use atomic::Ordering;
 use mopa::mopafy;
 pub unsafe trait Trace {
     fn trace(&mut self, _vis: &mut dyn Visitor) {}
@@ -25,6 +27,10 @@ pub unsafe trait Finalize {
         std::ptr::drop_in_place(self)
     }
 }
+
+pub const GC_WHITE: u8 = 0;
+pub const GC_BLACK: u8 = 1;
+pub const GC_GREY: u8 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -117,6 +123,33 @@ impl HeapObjectHeader {
         self.type_id
     }
 
+    #[inline]
+    pub fn set_color(&self, current: u8, new: u8) -> bool {
+        unsafe {
+            let atomic = &*(&self.padding as *const u16 as *const AtomicU16);
+            let word = atomic.load(atomic::Ordering::Relaxed);
+            match atomic.compare_exchange_weak(
+                ColourBit::update(word as _, current as _) as _,
+                ColourBit::update(word as _, new as _) as _,
+                atomic::Ordering::AcqRel,
+                atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => false,
+                Err(_) => true,
+            }
+        }
+    }
+    #[inline]
+    pub fn force_set_color(&mut self, color: u8) {
+        self.padding = ColourBit::update(self.padding as _, color as _) as _;
+    }
+    #[inline]
+    pub fn get_color(&self) -> u8 {
+        unsafe {
+            let atomic = &*(&self.padding as *const u16 as *const AtomicU16);
+            ColourBit::decode(atomic.load(Ordering::Relaxed) as _) as _
+        }
+    }
     #[inline(always)]
     pub fn parent_known_bit(&self) -> bool {
         ParentKnown::decode(self.padding as _) != 0
@@ -219,6 +252,7 @@ pub(crate) fn vtable_of<T: Collectable>() -> usize {
     unsafe { std::mem::transmute::<_, mopa::TraitObject>(x as *mut dyn Collectable).vtable as _ }
 }
 
+#[allow(dead_code)]
 pub(crate) fn vtable_of_trace<T: Trace>() -> usize {
     let x = null_mut::<T>();
     unsafe { std::mem::transmute::<_, mopa::TraitObject>(x as *mut dyn Trace).vtable as _ }

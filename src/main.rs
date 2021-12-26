@@ -1,7 +1,9 @@
 use comet_multi::{
     api::{Collectable, Finalize, Gc, Trace},
+    bitmap::{round_up, SpaceBitmap},
+    generational::{self, GenConOptions},
     letroot,
-    serial::{self, SerialOptions},
+    utils::mmap::Mmap,
 };
 
 pub enum Node {
@@ -58,31 +60,38 @@ fn main() {
 
     println!("{}", x.elapsed().as_millis());*/
 
-    let mut options = SerialOptions::default();
-    options.verbose = true;
-    options.nursery_size = 32 * 1024 * 1024;
+    let mut options = GenConOptions::default();
+    //options.verbose = true;
+    options.nursery_size = 64 * 1024 * 1024;
     // options.initial_size = 64 * 1024 * 1024;
-    let mut mutator = serial::instantiate_serial(options);
-    let stack = mutator.shadow_stack();
-    letroot!(list = stack, mutator.allocate(Node::None));
+    let mutator = generational::instantiate_gencon(options);
+
     let time = std::time::Instant::now();
-    let mut i = 0;
-    let mut j = 0;
-    let x = std::time::Instant::now();
-    while i < 500_000_000 {
-        *list = mutator.allocate(Node::Some {
-            value: j + 1,
-            next: *list,
-        });
+    let mut handles = vec![];
 
-        j += 1;
-        if i % 30000 == 0 {
-            *list = mutator.allocate(Node::None);
-            j = 0;
-        }
+    for _ in 0..4 {
+        handles.push(mutator.spawn_mutator(|mut mutator| {
+            let mut i = 0;
+            let stack = mutator.shadow_stack();
+            letroot!(list = stack, mutator.allocate(Node::None));
+            while i < 500_000_000 {
+                *list = mutator.allocate(Node::Some {
+                    value: 42,
+                    next: *list,
+                });
 
-        i += 1;
+                if i % 30000 == 0 {
+                    (*mutator).safepoint();
+                    *list = mutator.allocate(Node::None);
+                }
+
+                i += 1;
+            }
+        }));
     }
+    for handle in handles {
+        handle.join(&mutator);
+    }
+
     println!("{}", time.elapsed().as_millis());
-    drop(x);
 }

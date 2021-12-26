@@ -59,7 +59,7 @@ pub trait GcBase: Sized {
 
     fn allocate_large<T: Collectable + Sized + 'static>(
         &mut self,
-        mutator: &MutatorRef<Self>,
+        mutator: &mut MutatorRef<Self>,
         value: T,
     ) -> Gc<T>;
 
@@ -72,8 +72,9 @@ pub trait GcBase: Sized {
 
     fn collect(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]);
 
-    fn write_barrier(&mut self, object: Gc<dyn Collectable>) {
+    fn write_barrier(&mut self, mutator: &mut MutatorRef<Self>, object: Gc<dyn Collectable>) {
         let _ = object;
+        let _ = mutator;
     }
 
     fn init_tlab(&mut self, tlab: &mut Self::TLAB) {

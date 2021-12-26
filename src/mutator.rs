@@ -169,8 +169,9 @@ impl<H: 'static + GcBase> Mutator<H> {
 }
 
 impl<H: GcBase> MutatorRef<H> {
-    pub fn write_barrier(&self, object: Gc<dyn Collectable>) {
-        self.heap_ref().write_barrier(object);
+    pub fn write_barrier(&mut self, object: Gc<dyn Collectable>) {
+        let heap = unsafe { &mut *self.heap.get() };
+        heap.write_barrier(self, object);
     }
     pub fn collect(&self, keep: &mut [&mut dyn Trace]) {
         self.heap_ref().collect(self, keep);
@@ -196,7 +197,10 @@ impl<H: GcBase> MutatorRef<H> {
         let result = self.tlab.allocate(value);
 
         match result {
-            Ok(value) => value,
+            Ok(value) => {
+                self.heap_ref().post_alloc(value);
+                value
+            }
             Err(value) => self.allocate_slow(value, size),
         }
     }
@@ -208,7 +212,8 @@ impl<H: GcBase> MutatorRef<H> {
         size: usize,
     ) -> Gc<T> {
         if size >= H::LARGE_ALLOCATION_SIZE {
-            self.heap_ref().allocate_large(self, value)
+            let heap = unsafe { &mut *self.heap.get() };
+            heap.allocate_large(self, value)
         } else if self.tlab.can_thread_local_allocate(size) && H::SUPPORTS_TLAB {
             // try to refill tlab if gc supports tlab
             let mut this = self.clone();

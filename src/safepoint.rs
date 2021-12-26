@@ -1,7 +1,4 @@
-use std::{
-    cell::{Cell, UnsafeCell},
-    sync::{atomic::AtomicU32, Arc},
-};
+use std::{cell::Cell, sync::atomic::AtomicU32};
 
 use atomic::Ordering;
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
@@ -96,12 +93,46 @@ impl GlobalSafepoint {
 }
 
 pub struct SafepointScope<H: 'static + GcBase> {
-    heap: Arc<UnsafeCell<H>>,
+    heap: *mut H,
     old_state: ThreadState,
-    mutator: MutatorRef<H>,
+    mutator: Option<MutatorRef<H>>,
 }
 
 impl<H: 'static + GcBase> SafepointScope<H> {
+    pub fn new_no_mutator(heap: *mut H) -> Self {
+        let href = unsafe { &*heap };
+        let safepoint = href.safepoint();
+        assert!(safepoint.start(), "Failed to create safepoint");
+        let this = Self {
+            heap,
+            old_state: ThreadState::Unsafe,
+            mutator: None,
+        };
+        unsafe {
+            let href = &mut *this.heap;
+
+            href.global_lock();
+            let mutators = href.mutators();
+
+            for mutator in mutators {
+                while !(**mutator)
+                    .state
+                    .load(Ordering::Relaxed)
+                    .safe_for_safepoint()
+                    || !(**mutator)
+                        .state
+                        .load(Ordering::Acquire)
+                        .safe_for_safepoint()
+                {
+                    std::hint::spin_loop();
+                }
+            }
+
+            href.global_unlock();
+        }
+        this
+    }
+
     pub fn new(mutator: MutatorRef<H>) -> Option<Self> {
         let href = unsafe { &*mutator.heap.get() };
         let safepoint = href.safepoint();
@@ -115,13 +146,13 @@ impl<H: 'static + GcBase> SafepointScope<H> {
         }
 
         let this = Self {
-            heap: mutator.heap.clone(),
+            heap: mutator.heap.get(),
             old_state,
-            mutator,
+            mutator: Some(mutator),
         };
 
         unsafe {
-            let href = &mut *this.heap.get();
+            let href = &mut *this.heap;
 
             href.global_lock();
             let mutators = href.mutators();
@@ -145,7 +176,7 @@ impl<H: 'static + GcBase> SafepointScope<H> {
         Some(this)
     }
 
-    pub fn heap(&self) -> Arc<UnsafeCell<H>> {
+    pub fn heap(&self) -> *mut H {
         return self.heap.clone();
     }
 }
@@ -153,9 +184,11 @@ impl<H: 'static + GcBase> SafepointScope<H> {
 impl<H: GcBase> Drop for SafepointScope<H> {
     fn drop(&mut self) {
         unsafe {
-            let href = &mut *self.heap.get();
+            let href = &mut *self.heap;
             href.safepoint().end();
-            self.mutator.state_set(self.old_state, ThreadState::Waiting);
+            if let Some(mutator) = self.mutator.take() {
+                mutator.state_set(self.old_state, ThreadState::Waiting);
+            }
         }
     }
 }
