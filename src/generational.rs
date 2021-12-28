@@ -1,11 +1,15 @@
 use crate::api::vtable_of;
 use crate::api::Gc;
+use crate::api::GC_BLACK;
+use crate::api::GC_GREY;
+use crate::api::GC_WHITE;
 use crate::gc_base::GcBase;
+use crate::gc_base::TLAB;
 use crate::large_space::LargeObjectSpace;
 use crate::mutator::*;
+use crate::rosalloc_space::TLABWithRuns;
 use crate::safepoint::*;
 use crate::small_type_id;
-use crate::tlab::SimpleTLAB;
 use crate::utils::align_usize;
 use crate::{
     api::{HeapObjectHeader, Trace, Visitor},
@@ -14,19 +18,20 @@ use crate::{
     rosalloc_space::RosAllocSpace,
     utils::formatted_size,
 };
+use atomic::Atomic;
 //use atomic::Atomic;
 use atomic::Ordering;
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
+use rosalloc::dedicated_full_run;
+use rosalloc::Run;
 //use rosalloc::defs::NUM_THREAD_LOCAL_SIZE_BRACKETS;
-use rosalloc::Rosalloc;
+use rosalloc::defs::NUM_THREAD_LOCAL_SIZE_BRACKETS;
 //use rosalloc::Run;
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ptr::{null_mut, NonNull};
 use std::sync::Arc;
-use threadfin::Task;
-use threadfin::ThreadPool;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GcReason {
@@ -45,7 +50,7 @@ enum GcReason {
 ///
 /// ## Major
 ///
-/// Mark&Sweep with concurrent sweeping enabled.
+/// Mark&Sweep garbage collection is performed on major cycle.
 ///
 ///
 /// # Spaces
@@ -70,21 +75,31 @@ pub struct GenCon {
     verbose: bool,
 
     mark_stack: Vec<*mut HeapObjectHeader>,
-
-    num_old_space_allocated: usize,
+    old_mark_stack: Vec<*mut HeapObjectHeader>,
+    num_old_space_allocated: Atomic<usize>,
 
     total_gcs: usize,
     remembered_set: Vec<*mut HeapObjectHeader>,
     rem_set_lock: Lock,
 
     major_collection_threshold: f64,
-    next_major_collection_threshold: usize,
-    next_major_collection_initial: usize,
+    next_major_collection_threshold: Atomic<usize>,
+    next_major_collection_initial: Atomic<usize>,
     min_heap_size: usize,
     growth_rate_max: f64,
     promoted: usize,
-    pool: threadfin::ThreadPool,
-    sweep_task: Option<Task<(f64, usize)>>,
+
+    gc_state: Atomic<MajorPhase>,
+    alloc_color: u8,
+    mark_color: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MajorPhase {
+    Scanning,
+    Marking,
+    Sweeping,
+    Finalizing,
 }
 
 pub struct GenConOptions {
@@ -161,9 +176,10 @@ impl GenCon {
         );
 
         let mut this = Self {
-            sweep_task: None,
-            // atm only one concurrent sweep task is spawned
-            pool: ThreadPool::builder().size(1).stack_size(8 * 1024).build(),
+            alloc_color: GC_WHITE,
+            old_mark_stack: Vec::new(),
+            mark_color: GC_BLACK,
+            gc_state: Atomic::new(MajorPhase::Scanning),
             global_heap_lock: Lock::INIT,
             large_space_lock: Lock::INIT,
             large_space: LargeObjectSpace::new(),
@@ -179,17 +195,19 @@ impl GenCon {
             min_heap_size,
             growth_rate_max: growth_rate_max.unwrap_or_else(|| 1.4),
             major_collection_threshold: 1.82,
-            next_major_collection_initial: 0,
-            next_major_collection_threshold: 0,
-            num_old_space_allocated: 0,
+            next_major_collection_initial: Atomic::new(0),
+            next_major_collection_threshold: Atomic::new(0),
+            num_old_space_allocated: Atomic::new(0),
             old_space: rosalloc,
         };
         this.min_heap_size = this
             .min_heap_size
             .max((this.nursery.size() as f64 * this.major_collection_threshold) as usize);
 
-        this.next_major_collection_initial = this.min_heap_size;
-        this.next_major_collection_threshold = this.min_heap_size;
+        this.next_major_collection_initial
+            .store(this.min_heap_size, Ordering::Relaxed);
+        this.next_major_collection_threshold
+            .store(this.min_heap_size, Ordering::Release);
         this.set_major_threshold_from(0.0);
         this
     }
@@ -231,6 +249,7 @@ impl GenCon {
 
     unsafe fn trace_drag_out(
         &mut self,
+        mutator: &mut MutatorRef<Self>,
         root: &mut NonNull<HeapObjectHeader>,
         _parent: *mut HeapObjectHeader,
     ) {
@@ -244,7 +263,7 @@ impl GenCon {
                 let size = (*object).size();
                 let mut tl_bulk_allocated = 0;
 
-                let memory = if size > Rosalloc::LARGE_SIZE_THRESHOLD {
+                /* let memory = if size > Rosalloc::LARGE_SIZE_THRESHOLD {
                     (*(*self.old_space).rosalloc()).alloc_large_object(
                         size,
                         &mut 0,
@@ -261,22 +280,31 @@ impl GenCon {
                         &mut 0,
                         &mut tl_bulk_allocated,
                     )
-                };
+                };*/
+                let memory = (*self.old_space).alloc_common::<Self, true>(
+                    mutator,
+                    size,
+                    &mut 0,
+                    &mut 0,
+                    &mut tl_bulk_allocated,
+                );
                 if memory.is_null() {
                     promotion_oom(size, object.cast());
                 }
 
                 self.promoted += size;
-                (*(*self.old_space).get_live_bitmap()).set(memory);
                 {
                     // copy young object to memory in old space and update forwarding pointer
                     std::ptr::copy_nonoverlapping(object.cast::<u8>(), memory.cast::<u8>(), size);
                     (*object).set_forwarded(memory as _);
                     *root = NonNull::new_unchecked(memory.cast());
+                    (*memory.cast::<HeapObjectHeader>()).force_set_color(self.mark_color);
                 }
+                (*(*self.old_space).get_live_bitmap()).set(memory);
 
                 // incremase num_old_space_allocated. If at the end of minor collection it is larger than target footprint we perform major collection
-                self.num_old_space_allocated += tl_bulk_allocated;
+                self.num_old_space_allocated
+                    .fetch_add(tl_bulk_allocated, Ordering::AcqRel);
                 self.mark_stack.push(memory.cast());
             }
         } else if (*object).is_precise() {
@@ -296,65 +324,63 @@ impl GenCon {
 
         if (*object).is_precise() {
             if !(*PreciseAllocation::from_cell(object)).test_and_set_marked() {
-                self.mark_stack.push(object);
+                (*object).force_set_color(GC_GREY);
+                self.old_mark_stack.push(object);
             }
         } else if (*self.old_space).has_address(object.cast()) {
-            if !(*(*self.old_space).get_mark_bitmap()).set(object.cast()) {
-                self.mark_stack.push(object);
+            if !(*object).set_color(self.alloc_color, GC_GREY) {
+                self.old_mark_stack.push(object);
             }
         } else {
         }
     }
 
-    unsafe fn minor(&mut self, keep: &mut [&mut dyn Trace], reason: GcReason) -> bool {
+    unsafe fn minor(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        keep: &mut [&mut dyn Trace],
+        reason: GcReason,
+    ) -> bool {
         // threads must be suspended already
         let time = if self.verbose {
             Some(std::time::Instant::now())
         } else {
             None
         };
-        if let Some(sweep_task) = self.sweep_task.take() {
-            let (time, freed) = sweep_task.join();
-            let prev = self.num_old_space_allocated;
-            self.num_old_space_allocated -= freed;
-            if self.verbose {
-                eprintln!(
-                    "[gc] Concurrent sweep end: {}->{} {:.4}ms",
-                    formatted_size(prev),
-                    formatted_size(self.num_old_space_allocated),
-                    time
-                );
-            }
-            let total_bytes = self.num_old_space_allocated + self.large_space.bytes;
-
-            self.set_major_threshold_from(total_bytes as f64 * self.major_collection_threshold);
-        }
 
         self.large_space.prepare_for_marking(true);
         self.large_space.begin_marking(false);
-
+        let self_thread = mutator;
         keep.iter_mut().for_each(|item| {
             item.trace(&mut YoungVisitor {
                 gencon: self,
                 parent_object: null_mut(),
+                mutator: self_thread,
             });
         });
-
+        let mut revoke_freed = 0;
         for i in 0..self.mutators.len() {
             let mutator = self.mutators[i];
+            revoke_freed +=
+                (*(*self.old_space).rosalloc()).revoke_thread_local_runs(&mut (*mutator).tlab.runs);
             (*mutator).reset_tlab();
             (*mutator).shadow_stack().walk(|var| {
                 var.trace(&mut YoungVisitor {
                     gencon: self,
                     parent_object: null_mut(),
+                    mutator: self_thread,
                 });
             });
         }
+        (*(*self.old_space).rosalloc()).revoke_thread_unsafe_current_runs();
+        self.num_old_space_allocated
+            .fetch_sub(revoke_freed, Ordering::AcqRel);
 
         while let Some(object) = self.remembered_set.pop() {
             (*object).get_dyn().trace(&mut YoungVisitor {
                 gencon: self,
                 parent_object: object,
+                mutator: self_thread,
             });
             (*object).unmark();
         }
@@ -363,7 +389,9 @@ impl GenCon {
             (*object).get_dyn().trace(&mut YoungVisitor {
                 gencon: self,
                 parent_object: object,
+                mutator: self_thread,
             });
+            (*object).set_color(GC_GREY, GC_BLACK);
         }
         self.large_space.prepare_for_allocation(true);
         self.large_space.sweep();
@@ -376,17 +404,24 @@ impl GenCon {
         if let Some(time) = time {
             let elapsed = time.elapsed();
             eprintln!(
-                "[gc] GC({}) Pause Young ({:?}) Promoted {}(old space: {}) {:.4}ms",
+                "[gc] GC({}) Pause Young ({:?}) Promoted {}(old space: {} {}->{}) {:.4}ms",
                 self.total_gcs,
                 reason,
                 formatted_size(self.promoted),
-                formatted_size(self.num_old_space_allocated + self.large_space.bytes),
+                formatted_size(
+                    self.num_old_space_allocated.load(Ordering::Relaxed) + self.large_space.bytes
+                ),
+                print_color(self.alloc_color),
+                print_color(self.mark_color),
                 elapsed.as_micros() as f64 / 1000.0
             )
         }
         self.total_gcs += 1;
+
         self.promoted = 0;
-        self.large_space.bytes + self.num_old_space_allocated > self.next_major_collection_threshold
+
+        self.large_space.bytes + self.num_old_space_allocated.load(Ordering::Relaxed)
+            > self.next_major_collection_threshold.load(Ordering::Acquire)
     }
 
     unsafe fn major(&mut self, keep: &mut [&mut dyn Trace], reason: GcReason) {
@@ -413,39 +448,63 @@ impl GenCon {
             (*object).unmark();
         }
 
-        while let Some(object) = self.mark_stack.pop() {
+        while let Some(object) = self.old_mark_stack.pop() {
             (*object).get_dyn().trace(&mut OldVisitor { gencon: self });
+            (*object).force_set_color(self.mark_color);
         }
 
         self.large_space.prepare_for_allocation(false);
         self.large_space.sweep();
+        let prev = self.num_old_space_allocated.load(Ordering::Relaxed) + self.large_space.bytes;
+        // some of mutators might allocate into TLS runs while performing minor collection
+        // so we iterate all mutators and revoke all runs from them. Note that most of the time
+        // these runs point to `rosalloc::dedicated_full_run()` so revoking is basically no-op and
+        // does not do any time consuming operations.
+        let mut revoke_freed = 0;
+        for i in 0..self.mutators.len() {
+            let mutator = self.mutators[i];
+            revoke_freed +=
+                (*(*self.old_space).rosalloc()).revoke_thread_local_runs(&mut (*mutator).tlab.runs);
+        }
 
+        (*(*self.old_space).rosalloc()).revoke_thread_unsafe_current_runs();
+        std::mem::swap(&mut self.alloc_color, &mut self.mark_color);
         let rosalloc = self.old_space as usize;
-        self.sweep_task = Some(self.pool.execute(move || {
-            let start = std::time::Instant::now();
-            let rosalloc = rosalloc as *mut RosAllocSpace;
-            (*(*rosalloc).rosalloc()).revoke_thread_unsafe_current_runs();
+        let sweep_color = self.alloc_color;
+        let keep_color = self.mark_color;
+        let this = self as *mut Self as usize;
+        //std::mem::swap(&mut self.alloc_color, &mut self.mark_color);
+        self.num_old_space_allocated
+            .fetch_sub(revoke_freed, Ordering::Relaxed);
+        self.gc_state.store(MajorPhase::Sweeping, Ordering::Relaxed);
 
-            let freed = (*rosalloc)
-                .sweep(false, |pointers, _| {
-                    (*rosalloc).sweep_callback(pointers, false)
-                })
-                .0;
-            (*(*rosalloc).rosalloc()).trim();
+        let rosalloc = rosalloc as *mut RosAllocSpace;
+        let this = &mut *(this as *mut Self);
 
-            (*rosalloc).swap_bitmaps();
-            (*(*rosalloc).get_mark_bitmap()).clear_all();
-            let elapsed = start.elapsed().as_micros() as f64 / 1000.0;
+        let (freed, _) = (*rosalloc).sweep_colored(
+            |pointers, _| (*rosalloc).sweep_callback(pointers, false),
+            sweep_color,
+            keep_color,
+        );
+        (*(*rosalloc).rosalloc()).trim();
+        this.num_old_space_allocated
+            .fetch_sub(freed, Ordering::Relaxed);
+        let total_bytes =
+            this.num_old_space_allocated.load(Ordering::Acquire) + this.large_space.bytes;
+        this.set_major_threshold_from(total_bytes as f64 * this.major_collection_threshold);
 
-            (elapsed, freed)
-        }));
+        this.gc_state.store(MajorPhase::Scanning, Ordering::Relaxed);
+
         if let Some(time) = time {
             eprintln!(
-                "[gc] GC({}) Pause Old ({:?}) {}({}) {:.4}ms",
+                "[gc] GC({}) Pause Old ({:?}) {}->{}({}) {:.4}ms",
                 self.total_gcs,
                 reason,
-                formatted_size(self.num_old_space_allocated + self.large_space.bytes),
-                formatted_size(self.next_major_collection_threshold),
+                formatted_size(prev),
+                formatted_size(
+                    self.num_old_space_allocated.load(Ordering::Relaxed) + self.large_space.bytes
+                ),
+                formatted_size(self.next_major_collection_threshold.load(Ordering::Relaxed)),
                 time.elapsed().as_micros() as f64 / 1000.0
             )
         }
@@ -453,8 +512,8 @@ impl GenCon {
     }
 
     fn set_major_threshold_from(&mut self, mut threshold: f64) {
-        let threshold_max =
-            (self.next_major_collection_initial as f64 * self.growth_rate_max) as usize;
+        let threshold_max = (self.next_major_collection_initial.load(Ordering::Relaxed) as f64
+            * self.growth_rate_max) as usize;
 
         if threshold > threshold_max as f64 {
             threshold = threshold_max as _;
@@ -462,23 +521,24 @@ impl GenCon {
         if threshold < self.min_heap_size as f64 {
             threshold = self.min_heap_size as _;
         }
-        self.next_major_collection_initial = threshold as _;
-        self.next_major_collection_threshold = threshold as _;
+        self.next_major_collection_initial
+            .store(threshold as _, Ordering::Relaxed);
+        self.next_major_collection_threshold
+            .store(threshold as _, Ordering::Release);
         if self.verbose {
             eprintln!(
                 "[gc] Major threshold set to {}",
-                formatted_size(self.next_major_collection_threshold)
+                formatted_size(threshold as _)
             );
         }
     }
     #[inline(always)]
     unsafe fn write_barrier_internal(&mut self, object: *mut HeapObjectHeader) {
         if (*self.old_space).has_address(object.cast())
-            && (*object).is_precise()
-            && (*PreciseAllocation::from_cell(object)).is_marked()
+            || ((*object).is_precise() && (*PreciseAllocation::from_cell(object)).is_marked())
+        // mark bit in LOS object header means it is in large old object
         {
             if !(*object).marked_bit() {
-                (*object).set_marked_bit();
                 self.write_barrier_slow(object);
             }
         }
@@ -486,6 +546,7 @@ impl GenCon {
 
     #[cold]
     unsafe fn write_barrier_slow(&mut self, object: *mut HeapObjectHeader) {
+        (*object).set_marked_bit(); // marked_bit is used for seeing if object is in remembered set
         self.rem_set_lock.lock();
         self.remembered_set.push(object);
         self.rem_set_lock.unlock();
@@ -505,12 +566,14 @@ fn promotion_oom(size: usize, object: *const u8) -> ! {
 pub struct YoungVisitor<'a> {
     gencon: &'a mut GenCon,
     parent_object: *mut HeapObjectHeader,
+    mutator: &'a mut MutatorRef<GenCon>,
 }
 
 impl<'a> Visitor for YoungVisitor<'a> {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>) {
         unsafe {
-            self.gencon.trace_drag_out(root, self.parent_object);
+            self.gencon
+                .trace_drag_out(self.mutator, root, self.parent_object);
         }
     }
 }
@@ -528,7 +591,7 @@ impl<'a> Visitor for OldVisitor<'a> {
 }
 
 impl GcBase for GenCon {
-    type TLAB = SimpleTLAB<Self>;
+    type TLAB = GenConTLAB;
     const SUPPORTS_TLAB: bool = true;
     const LARGE_ALLOCATION_SIZE: usize = 16 * 1024;
     #[inline]
@@ -538,13 +601,17 @@ impl GcBase for GenCon {
         }
     }
 
-    fn collect_alloc_failure(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
+    fn collect_alloc_failure(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        keep: &mut [&mut dyn Trace],
+    ) {
         match SafepointScope::new(mutator.clone()) {
             Some(x) => unsafe {
                 self.global_heap_lock.lock();
                 self.rem_set_lock.lock();
                 self.large_space_lock.lock();
-                if self.minor(keep, GcReason::AllocationFailure) {
+                if self.minor(mutator, keep, GcReason::AllocationFailure) {
                     self.major(keep, GcReason::OldSpaceFull);
                 }
                 drop(x);
@@ -555,14 +622,14 @@ impl GcBase for GenCon {
             None => return,
         }
     }
-    fn collect(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
+    fn collect(&mut self, mutator: &mut MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
         unsafe {
             match SafepointScope::new(mutator.clone()) {
                 Some(safepoint) => {
                     self.global_heap_lock.lock();
                     self.rem_set_lock.lock();
                     self.large_space_lock.lock();
-                    if self.minor(keep, GcReason::RequestedByUser) {
+                    if self.minor(mutator, keep, GcReason::RequestedByUser) {
                         self.major(keep, GcReason::OldSpaceFull);
                     }
                     drop(safepoint);
@@ -574,7 +641,7 @@ impl GcBase for GenCon {
             }
         }
     }
-    fn full_collection(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
+    fn full_collection(&mut self, mutator: &mut MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
         unsafe {
             let s = mutator.enter_unsafe();
             self.wait_for_gc_to_complete();
@@ -584,7 +651,7 @@ impl GcBase for GenCon {
                     self.global_heap_lock.lock();
                     self.rem_set_lock.lock();
                     self.large_space_lock.lock();
-                    self.minor(keep, GcReason::RequestedByUser);
+                    self.minor(mutator, keep, GcReason::RequestedByUser);
                     self.major(keep, GcReason::RequestedByUser);
                     drop(safepoint);
                     self.global_heap_lock.unlock();
@@ -596,7 +663,7 @@ impl GcBase for GenCon {
         }
     }
 
-    fn minor_collection(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
+    fn minor_collection(&mut self, mutator: &mut MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
         unsafe {
             let s = mutator.enter_unsafe();
             self.wait_for_gc_to_complete();
@@ -606,7 +673,7 @@ impl GcBase for GenCon {
                     self.global_heap_lock.lock();
                     self.rem_set_lock.lock();
                     self.large_space_lock.lock();
-                    self.minor(keep, GcReason::RequestedByUser);
+                    self.minor(mutator, keep, GcReason::RequestedByUser);
                     drop(safepoint);
                     self.global_heap_lock.unlock();
                     self.rem_set_lock.unlock();
@@ -725,7 +792,6 @@ impl GcBase for GenCon {
     }
 }
 
-/*
 pub struct GenConTLAB {
     heap: Arc<UnsafeCell<GenCon>>,
     tlab_start: *mut u8,
@@ -735,5 +801,90 @@ pub struct GenConTLAB {
     runs: [*mut Run; NUM_THREAD_LOCAL_SIZE_BRACKETS],
 }
 
-impl GenConTLAB {}
-*/
+impl TLAB<GenCon> for GenConTLAB {
+    fn can_thread_local_allocate(&self, size: usize) -> bool {
+        size <= 8 * 1024
+    }
+    #[inline]
+    fn allocate<T: crate::api::Collectable + 'static>(
+        &mut self,
+        value: T,
+    ) -> Result<crate::api::Gc<T>, T> {
+        if self.tlab_cursor.is_null() {
+            return Err(value);
+        }
+        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
+        unsafe {
+            let result = self.tlab_cursor;
+            let new_cursor = result.add(size);
+            if new_cursor > self.tlab_end {
+                return Err(value);
+            }
+            self.tlab_cursor = new_cursor;
+            let header = result.cast::<HeapObjectHeader>();
+            header.write(HeapObjectHeader {
+                type_id: small_type_id::<T>(),
+                padding: 0,
+                padding2: 0,
+                value: 0,
+            });
+            (*header).set_vtable(vtable_of::<T>());
+            (*header).set_size(size);
+            ((*header).data() as *mut T).write(value);
+            let h = &mut *self.heap.get();
+            let gc = Gc {
+                base: NonNull::new_unchecked(header),
+                marker: PhantomData,
+            };
+            h.post_alloc(gc);
+            Ok(gc)
+        }
+    }
+
+    fn refill(&mut self, mutator: &MutatorRef<GenCon>, _size: usize) -> bool {
+        unsafe {
+            let h = &mut *self.heap.get();
+            let tlab = h.alloc_tlab_area(mutator, 32 * 1024);
+            if tlab.is_null() {
+                return false;
+            }
+            self.tlab_start = tlab;
+            self.tlab_end = tlab.add(32 * 1024);
+            self.tlab_cursor = tlab;
+            true
+        }
+    }
+
+    fn reset(&mut self) {
+        self.tlab_cursor = null_mut();
+        self.tlab_end = null_mut();
+        self.tlab_start = null_mut();
+        self.runs.iter_mut().for_each(|run| {
+            *run = dedicated_full_run();
+        });
+    }
+    fn create(heap: Arc<UnsafeCell<GenCon>>) -> Self {
+        Self {
+            heap,
+            tlab_start: null_mut(),
+            tlab_cursor: null_mut(),
+            tlab_end: null_mut(),
+            runs: [dedicated_full_run(); NUM_THREAD_LOCAL_SIZE_BRACKETS],
+        }
+    }
+}
+
+impl TLABWithRuns for GenConTLAB {
+    fn get_runs(&mut self) -> &mut [*mut Run; NUM_THREAD_LOCAL_SIZE_BRACKETS] {
+        &mut self.runs
+    }
+}
+
+fn print_color(c: u8) -> &'static str {
+    match c {
+        GC_WHITE => "white",
+        GC_GREY => "grey",
+        GC_BLACK => "black",
+        _ => unreachable!(),
+    }
+}

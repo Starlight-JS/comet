@@ -173,8 +173,9 @@ impl<H: GcBase> MutatorRef<H> {
         let heap = unsafe { &mut *self.heap.get() };
         heap.write_barrier(self, object);
     }
-    pub fn collect(&self, keep: &mut [&mut dyn Trace]) {
-        self.heap_ref().collect(self, keep);
+    pub fn collect(&mut self, keep: &mut [&mut dyn Trace]) {
+        let heap = unsafe { &mut *self.heap.get() };
+        heap.collect(self, keep);
     }
 
     #[inline(always)]
@@ -211,16 +212,15 @@ impl<H: GcBase> MutatorRef<H> {
         mut value: T,
         size: usize,
     ) -> Gc<T> {
+        let heap = unsafe { &mut *self.heap.get() };
         if size >= H::LARGE_ALLOCATION_SIZE {
-            let heap = unsafe { &mut *self.heap.get() };
             heap.allocate_large(self, value)
         } else if self.tlab.can_thread_local_allocate(size) && H::SUPPORTS_TLAB {
             // try to refill tlab if gc supports tlab
             let mut this = self.clone();
             if !this.tlab.refill(&self.clone(), size) {
                 // if tlab failed to be refilled we request GC cycle and try to get some memory
-                self.heap_ref()
-                    .collect_alloc_failure(self, &mut [&mut value]);
+                heap.collect_alloc_failure(self, &mut [&mut value]);
                 if !this.tlab.refill(&self, size) {
                     // if refilling again fails we just OOM
                     oom_abort();

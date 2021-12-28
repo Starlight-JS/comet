@@ -63,16 +63,19 @@ impl RosAllocSpace {
     }
 
     #[inline]
-    pub unsafe fn alloc_common<H: GcBase<TLAB = RosAllocTLAB>, const THREAD_SAFE: bool>(
+    pub unsafe fn alloc_common<H: GcBase, const THREAD_SAFE: bool>(
         &mut self,
         mutator: &mut MutatorRef<H>,
         num_bytes: usize,
         bytes_allocated: &mut usize,
         usable_size: &mut usize,
         bytes_tl_bulk_allocated: &mut usize,
-    ) -> *mut u8 {
+    ) -> *mut u8
+    where
+        H::TLAB: TLABWithRuns,
+    {
         let result = (*self.rosalloc).alloc::<THREAD_SAFE>(
-            &mut mutator.tlab.runs,
+            &mut mutator.tlab.get_runs(),
             num_bytes,
             bytes_allocated,
             usable_size,
@@ -288,5 +291,15 @@ extern "C" fn morecore(_rosalloc: *mut Rosalloc, increment: isize, data: *mut u8
         let space = &mut *data.cast::<RosAllocSpace>();
 
         space.morecore(increment);
+    }
+}
+
+pub trait TLABWithRuns {
+    fn get_runs(&mut self) -> &mut [*mut Run; NUM_THREAD_LOCAL_SIZE_BRACKETS];
+}
+
+impl TLABWithRuns for RosAllocTLAB {
+    fn get_runs(&mut self) -> &mut [*mut Run; NUM_THREAD_LOCAL_SIZE_BRACKETS] {
+        &mut self.runs
     }
 }

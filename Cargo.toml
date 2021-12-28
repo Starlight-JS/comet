@@ -17,8 +17,8 @@ scoped_threadpool = "0.1"
 crossbeam-deque = "0.8"
 rand = "0.8"
 flume = "0.10"
-#rosalloc = { git = "https://github.com/playxe/rosalloc" }
-rosalloc = { path = "rosalloc" }
+rosalloc = { git = "https://github.com/playxe/rosalloc" }
+#rosalloc = { path = "rosalloc" }
 im = "15.0"
 memx = "0.1"
 [target.'cfg(windows)'.dependencies]

@@ -163,7 +163,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VE
         mutator: &mut MutatorRef<Self>,
         mut value: T,
     ) -> Gc<T> {
-        self.collect(&mutator, &mut [&mut value]);
+        self.collect(mutator, &mut [&mut value]);
         self.alloc_once::<T, true, false>(mutator, value)
     }
     #[inline(never)]
@@ -234,7 +234,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
     const SUPPORTS_TLAB: bool = false;
     fn collect(
         &mut self,
-        mutator: &MutatorRef<MarkSweep<VERBOSE_GC, VERBOSE_ALLOC>>,
+        mutator: &mut MutatorRef<MarkSweep<VERBOSE_GC, VERBOSE_ALLOC>>,
         mut keep: &mut [&mut dyn Trace],
     ) {
         match SafepointScope::new(mutator.clone()) {

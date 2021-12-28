@@ -124,6 +124,38 @@ impl ContinuousMemMapAllocSpace {
     pub fn swap_bitmaps(&mut self) {
         std::mem::swap(&mut self.mark_bitmap, &mut self.live_bitmap);
     }
+
+    pub fn sweep_colored(
+        &mut self,
+        mut callback: impl FnMut(&[*mut u8], bool) -> usize,
+        alloc_color: u8,
+        mark_color: u8,
+    ) -> (usize, usize) {
+        unsafe {
+            let live_bitmap = &*self.get_live_bitmap();
+
+            let mut freed = 0;
+            let mut num_ptrs = 0;
+
+            SpaceBitmap::<8>::sweep_walk_color(
+                live_bitmap,
+                self.begin() as _,
+                self.end() as _,
+                |ptrc, ptrs| {
+                    let pointers = std::slice::from_raw_parts(ptrs.cast::<*mut u8>(), ptrc);
+                    num_ptrs += pointers.len();
+
+                    freed += callback(pointers, false);
+                },
+                None,
+                mark_color,
+                alloc_color,
+            );
+
+            (freed, num_ptrs)
+        }
+    }
+
     pub fn sweep(
         &mut self,
         swap_bitmaps: bool,
@@ -274,7 +306,7 @@ impl MallocSpace {
 
         *growth_limit = round_up(*growth_limit as _, PAGE_SIZE as _) as _;
         *capacity = round_up(*capacity as _, PAGE_SIZE as _) as _;
-        let mem_map = Mmap::new(*capacity);
+        let mem_map = Mmap::new(*capacity, 8);
 
         mem_map
     }

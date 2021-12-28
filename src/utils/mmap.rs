@@ -84,8 +84,13 @@ pub mod _unix {
 
     use std::ptr::null_mut;
 
+    use rosalloc::defs::PAGE_SIZE;
+
+    use crate::bitmap::round_up;
+
     pub struct Mmap {
         start: *mut u8,
+        aligned_start: *mut u8,
         end: *mut u8,
         size: usize,
     }
@@ -98,11 +103,20 @@ pub mod _unix {
             Self {
                 start: null_mut(),
                 end: null_mut(),
+                aligned_start: null_mut(),
                 size: 0,
             }
         }
-        pub fn new(size: usize) -> Self {
+        pub fn aligned_start(&self) -> *mut u8 {
+            self.aligned_start
+        }
+        pub fn new(size: usize, alignment: usize) -> Self {
             unsafe {
+                let size = if alignment != 0 {
+                    round_up(size as u64 + alignment as u64, PAGE_SIZE as _) as usize
+                } else {
+                    round_up(size as _, PAGE_SIZE as _) as usize
+                };
                 let map = libc::mmap(
                     core::ptr::null_mut(),
                     size as _,
@@ -111,15 +125,21 @@ pub mod _unix {
                     -1,
                     0,
                 );
+
                 libc::madvise(map, size, libc::MADV_SEQUENTIAL);
                 if map == libc::MAP_FAILED {
                     panic!("mmap failed");
                 }
-                Self {
+                let mut this = Self {
                     start: map as *mut u8,
+                    aligned_start: null_mut(),
                     end: (map as usize + size) as *mut u8,
                     size,
+                };
+                if alignment != 0 {
+                    this.aligned_start = this.aligned(alignment);
                 }
+                this
             }
         }
         /// Return aligned pointer

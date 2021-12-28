@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, GC_BLACK, GC_GREY},
     bump_pointer_space::BumpPointerSpace,
@@ -259,7 +260,7 @@ impl GcBase for ConcSemispace {
     ) -> crate::api::Gc<T> {
         self.alloc_inline(mutator, value)
     }
-    fn collect(&mut self, mutator: &MutatorRef<Self>, mut keep: &mut [&mut dyn Trace]) {
+    fn collect(&mut self, _mutator: &mut MutatorRef<Self>, _keep: &mut [&mut dyn Trace]) {
         /*match SafepointScope::new(mutator.clone()) {
             Some(safepoint) => {
                 self.global_heap_lock.lock();

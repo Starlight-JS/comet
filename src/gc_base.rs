@@ -17,7 +17,11 @@ pub trait GcBase: Sized {
     fn get_rosalloc_space(&self) -> *mut RosAllocSpace {
         null_mut()
     }
-    fn collect_alloc_failure(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
+    fn collect_alloc_failure(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        keep: &mut [&mut dyn Trace],
+    ) {
         self.collect(mutator, keep);
     }
     fn attach_current_thread(&mut self, mutator: *mut Mutator<Self>);
@@ -63,14 +67,14 @@ pub trait GcBase: Sized {
         value: T,
     ) -> Gc<T>;
 
-    fn minor_collection(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
+    fn minor_collection(&mut self, mutator: &mut MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
         self.full_collection(mutator, keep);
     }
-    fn full_collection(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
+    fn full_collection(&mut self, mutator: &mut MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
         self.collect(mutator, keep);
     }
 
-    fn collect(&mut self, mutator: &MutatorRef<Self>, keep: &mut [&mut dyn Trace]);
+    fn collect(&mut self, mutator: &mut MutatorRef<Self>, keep: &mut [&mut dyn Trace]);
 
     fn write_barrier(&mut self, mutator: &mut MutatorRef<Self>, object: Gc<dyn Collectable>) {
         let _ = object;

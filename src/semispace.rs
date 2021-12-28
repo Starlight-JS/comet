@@ -179,7 +179,7 @@ impl GcBase for SemiSpace {
             gc
         }
     }
-    fn collect(&mut self, mutator: &MutatorRef<Self>, mut keep: &mut [&mut dyn Trace]) {
+    fn collect(&mut self, mutator: &mut MutatorRef<Self>, mut keep: &mut [&mut dyn Trace]) {
         match SafepointScope::new(mutator.clone()) {
             Some(safepoint) => {
                 self.global_heap_lock.lock();
