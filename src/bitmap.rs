@@ -1,5 +1,7 @@
 use crate::api::HeapObjectHeader;
 use crate::api::MIN_ALLOCATION;
+use crate::immix::block::IMMIX_LINE_SIZE;
+use crate::immix::chunk::CHUNK_SIZE;
 use crate::utils::mmap::Mmap;
 use atomic::Atomic;
 use atomic::Ordering;
@@ -778,12 +780,7 @@ macro_rules! gen_const_bitmap {
     ($name: ident, $align: expr, $capacity: expr) => {
         #[allow(dead_code)]
         pub struct $name {
-            storage: [usize; {
-                let bytes_covered_per_word = $name::ALIGN * BITS_PER_INTPTR;
-                ((round_up($name::CAPACITY as _, bytes_covered_per_word as _)
-                    / bytes_covered_per_word as u64)
-                    * size_of::<usize>() as u64) as usize
-            }],
+            storage: [u8; Self::BITMAP_SIZE],
             bitmap_begin: *mut Atomic<usize>,
             bitmap_size: usize,
             heap_begin: usize,
@@ -791,6 +788,12 @@ macro_rules! gen_const_bitmap {
             name: &'static str,
         }
         impl $name {
+            pub const BITMAP_SIZE: usize = {
+                let bytes_covered_per_word = $align * (core::mem::size_of::<usize>() * 8);
+                (round_up($capacity as u64, bytes_covered_per_word as _)
+                    / bytes_covered_per_word as u64) as usize
+                    * core::mem::size_of::<isize>()
+            };
             pub const ALIGN: usize = $align;
             pub const CAPACITY: usize = $capacity;
             pub fn is_null(&self) -> bool {
@@ -1167,13 +1170,14 @@ macro_rules! gen_const_bitmap {
                 }
             }
             pub unsafe fn init_bitmap(&mut self) {
-                self.bitmap_begin = (&mut self.storage[0] as *mut usize) as *mut Atomic<usize>;
+                self.bitmap_begin = (&mut self.storage[0] as *mut u8) as *mut Atomic<usize>;
             }
             pub fn create(name: &'static str, heap_begin: *mut u8, heap_capacity: usize) -> Self {
                 let mut this = Self::empty();
                 this.name = name;
                 this.heap_begin = heap_begin as _;
-                this.heap_limit = heap_capacity;
+                this.heap_limit = heap_begin as usize + heap_capacity;
+                this.bitmap_size = Self::BITMAP_SIZE;
                 this
             }
 
@@ -1310,4 +1314,6 @@ macro_rules! gen_const_bitmap {
     };
 }
 
-gen_const_bitmap!(LineMarkTable, 256, 4 * 1024 * 1024);
+gen_const_bitmap!(LineMarkTable, IMMIX_LINE_SIZE, CHUNK_SIZE);
+
+pub type ChunkMap = SpaceBitmap<{ CHUNK_SIZE }>;

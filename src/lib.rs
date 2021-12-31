@@ -18,6 +18,7 @@ pub mod mutator;
 pub mod rosalloc_space;
 pub mod safepoint;
 pub mod semispace;
+pub mod shenandoah;
 pub mod space;
 pub mod tlab;
 pub mod waitlists;
