@@ -1,3 +1,4 @@
+use crate::api::Weak;
 use crate::bitmap::SpaceBitmap;
 use crate::gc_base::AllocationSpace;
 use crate::rosalloc_space::{RosAllocSpace, RosAllocTLAB};
@@ -37,6 +38,7 @@ pub struct MarkSweep<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> {
     pool: scoped_threadpool::Pool,
     verbose: bool,
     total_gcs: usize,
+    weak_refs: Vec<Weak<dyn Collectable>>,
 }
 fn max_bytes_bulk_allocated_for(size: usize) -> usize {
     if !Rosalloc::is_size_for_thread_local(size) {
@@ -127,6 +129,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VE
             growth_multiplier,
             pool: scoped_threadpool::Pool::new(num_threads as _),
             verbose,
+            weak_refs: vec![],
         };
         unsafe {
             (*(*this.rosalloc).rosalloc()).set_footprint_limit((*this.rosalloc).capacity());
@@ -240,6 +243,19 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
 {
     type TLAB = RosAllocTLAB;
     const SUPPORTS_TLAB: bool = false;
+    fn allocate_weak<T: Collectable + ?Sized>(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        value: Gc<T>,
+    ) -> Weak<T> {
+        let weak_ref = Weak::create(mutator, value);
+        self.global_heap_lock.lock();
+        self.weak_refs.push(weak_ref.to_dyn());
+        unsafe {
+            self.global_heap_lock.unlock();
+        }
+        weak_ref
+    }
     fn collect(
         &mut self,
         mutator: &mut MutatorRef<MarkSweep<VERBOSE_GC, VERBOSE_ALLOC>>,

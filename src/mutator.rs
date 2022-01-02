@@ -10,7 +10,7 @@ use atomic::{Atomic, Ordering};
 use parking_lot::{Condvar, Mutex};
 
 use crate::{
-    api::{Collectable, Finalize, Gc, HeapObjectHeader, Trace},
+    api::{Collectable, Finalize, Gc, HeapObjectHeader, Trace, Weak},
     gc_base::{AllocationSpace, GcBase, TLAB},
     safepoint::GlobalSafepoint,
     shadow_stack::ShadowStack,
@@ -184,6 +184,11 @@ impl<H: GcBase> MutatorRef<H> {
         value: T,
     ) -> Result<Gc<T>, T> {
         self.tlab.allocate(value)
+    }
+    #[inline]
+    pub fn allocate_weak<T: Collectable + ?Sized>(&mut self, value: Gc<T>) -> Weak<T> {
+        let href = unsafe { &mut *self.heap.get() };
+        href.allocate_weak(self, value)
     }
     /// Allocate `T` on GC heap
     #[inline(always)]

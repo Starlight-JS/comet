@@ -176,7 +176,13 @@ impl TLAB<ConcSemispace> for ConcSemispaceTLAB {
 impl GcBase for ConcSemispace {
     const SUPPORTS_TLAB: bool = true;
     type TLAB = ConcSemispaceTLAB;
-
+    fn allocate_weak<T: Collectable + ?Sized>(
+        &mut self,
+        _mutator: &mut MutatorRef<Self>,
+        _value: Gc<T>,
+    ) -> crate::api::Weak<T> {
+        todo!()
+    }
     fn alloc_tlab_area(&mut self, _mutator: &MutatorRef<Self>, _size: usize) -> *mut u8 {
         let memory = self.to_space.bump_alloc(32 * 1024);
         memory

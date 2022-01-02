@@ -2,7 +2,7 @@ use std::{cell::UnsafeCell, mem::size_of, ptr::null_mut, sync::Arc};
 
 use crate::{
     alloc::array::Array,
-    api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace},
+    api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Weak},
     mutator::{Mutator, MutatorRef},
     rosalloc_space::RosAllocSpace,
     safepoint::GlobalSafepoint,
@@ -21,7 +21,11 @@ pub trait GcBase: Sized {
     const SUPPORTS_TLAB: bool = false;
 
     type TLAB: TLAB<Self>;
-
+    fn allocate_weak<T: Collectable + ?Sized>(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        value: Gc<T>,
+    ) -> Weak<T>;
     fn get_rosalloc_space(&self) -> *mut RosAllocSpace {
         null_mut()
     }

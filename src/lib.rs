@@ -1,4 +1,4 @@
-#![feature(new_uninit, const_type_id)]
+#![feature(new_uninit, const_type_id, vec_retain_mut)]
 #[macro_use]
 pub mod shadow_stack;
 #[macro_use]

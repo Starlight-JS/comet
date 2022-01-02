@@ -38,7 +38,7 @@ impl<T: Trace + 'static> Array<T> {
         std::mem::forget(init.take().unwrap());
         this.is_inited = true;
 
-        todo!()
+        this
     }
     pub fn data(&self) -> *const T {
         self.values.as_ptr()
@@ -50,6 +50,27 @@ impl<T: Trace + 'static> Array<T> {
 
     pub fn len(&self) -> usize {
         self.length as _
+    }
+
+    pub fn at(&self, index: usize) -> &T {
+        unsafe { &*self.data().add(index) }
+    }
+
+    pub fn at_mut(&mut self, index: usize) -> &mut T {
+        unsafe { &mut *self.data_mut().add(index) }
+    }
+}
+
+impl<T: Trace + std::fmt::Debug> std::fmt::Debug for Array<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Array(")?;
+        for i in 0..self.len() {
+            write!(f, "{:?}", self.at(i))?;
+            if i != self.len() - 1 {
+                write!(f, ",")?
+            }
+        }
+        write!(f, ")")
     }
 }
 

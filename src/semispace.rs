@@ -1,7 +1,7 @@
 use std::{cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc};
 
 use crate::{
-    api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor},
+    api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak},
     bump_pointer_space::BumpPointerSpace,
     gc_base::{AllocationSpace, GcBase},
     large_space::{LargeObjectSpace, PreciseAllocation},
@@ -24,6 +24,7 @@ pub struct SemiSpace {
     pub(crate) mutators: Vec<*mut Mutator<Self>>,
     pub(crate) safepoint: GlobalSafepoint,
     pub(crate) mark_stack: Vec<*mut HeapObjectHeader>,
+    weak_refs: Vec<Weak<dyn Collectable>>,
 }
 
 pub fn instantiate_semispace(semispace_size: usize) -> MutatorRef<SemiSpace> {
@@ -37,6 +38,7 @@ pub fn instantiate_semispace(semispace_size: usize) -> MutatorRef<SemiSpace> {
 
         from_space: BumpPointerSpace::new(semispace_size),
         to_space: BumpPointerSpace::new(semispace_size),
+        weak_refs: vec![],
     }));
 
     let href = unsafe { &mut *heap.get() };
@@ -81,7 +83,19 @@ impl SemiSpace {
 impl GcBase for SemiSpace {
     const SUPPORTS_TLAB: bool = true;
     type TLAB = SimpleTLAB<Self>;
-
+    fn allocate_weak<T: Collectable + ?Sized>(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        value: Gc<T>,
+    ) -> Weak<T> {
+        let weak_ref = Weak::create(mutator, value);
+        self.global_heap_lock.lock();
+        self.weak_refs.push(weak_ref.to_dyn());
+        unsafe {
+            self.global_heap_lock.unlock();
+        }
+        weak_ref
+    }
     fn alloc_tlab_area(&mut self, _mutator: &MutatorRef<Self>, _size: usize) -> *mut u8 {
         let memory = self.to_space.bump_alloc(32 * 1024);
         memory

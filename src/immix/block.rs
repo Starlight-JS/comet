@@ -148,7 +148,6 @@ impl ImmixBlock {
                 self.state = BlockState::Reusable {
                     unavailable_lines: marked_lines as u8,
                 };
-
                 space.reusable_blocks.push(self as *mut Self);
             } else {
                 self.state = BlockState::Unmarked;

@@ -88,4 +88,12 @@ impl BumpPointerSpace {
 
         old
     }
+
+    pub fn start(&self) -> *mut u8 {
+        self.start
+    }
+
+    pub fn end(&self) -> *mut u8 {
+        self.end
+    }
 }

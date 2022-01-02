@@ -1,6 +1,7 @@
 use crate::api::vtable_of;
 use crate::api::Collectable;
 use crate::api::Gc;
+use crate::api::Weak;
 use crate::api::GC_BLACK;
 use crate::api::GC_GREY;
 use crate::api::GC_WHITE;
@@ -97,6 +98,7 @@ pub struct GenCon {
     alloc_color: u8,
     mark_color: u8,
     growth_limit: usize,
+    weak_refs: Vec<Weak<dyn Collectable>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -205,6 +207,7 @@ impl GenCon {
             next_major_collection_threshold: Atomic::new(0),
             num_old_space_allocated: Atomic::new(0),
             old_space: rosalloc,
+            weak_refs: vec![],
         };
         this.min_heap_size = this
             .min_heap_size
@@ -340,7 +343,12 @@ impl GenCon {
         } else {
         }
     }
-
+    pub fn is_young(&self, ptr: *mut HeapObjectHeader) -> bool {
+        unsafe {
+            self.nursery.contains(ptr.cast())
+                || (*ptr).is_precise() && !(*PreciseAllocation::from_cell(ptr)).is_marked()
+        }
+    }
     unsafe fn minor(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -399,6 +407,32 @@ impl GenCon {
             });
             (*object).set_color(GC_GREY, GC_BLACK);
         }
+        let nursery_start = self.nursery.start();
+        let nursery_end = self.nursery.end();
+        let is_young = |ptr: *mut HeapObjectHeader| {
+            (ptr.cast::<u8>() >= nursery_start && ptr.cast::<u8>() < nursery_end)
+                || (*ptr).is_precise() && !(*PreciseAllocation::from_cell(ptr)).is_marked()
+        };
+        self.weak_refs.retain_mut(|object| {
+            let header = object.base();
+            if (*header).is_forwarded() {
+                object.set_base((*header).vtable() as _);
+                object.after_mark(|header| {
+                    if !(*header).is_forwarded() && is_young(header) {
+                        null_mut()
+                    } else if (*header).is_forwarded() {
+                        (*header).vtable() as *mut HeapObjectHeader
+                    } else {
+                        // LOS or old space object
+                        header
+                    }
+                });
+                true
+            } else {
+                // old weak refs are processed in major collection
+                !is_young(object.base())
+            }
+        });
         self.large_space.prepare_for_allocation(true);
         self.large_space.sweep();
 
@@ -458,6 +492,22 @@ impl GenCon {
             (*object).get_dyn().trace(&mut OldVisitor { gencon: self });
             (*object).force_set_color(self.mark_color);
         }
+        let color = self.mark_color;
+        self.weak_refs.retain_mut(|object| {
+            let header = object.base();
+            if (*header).get_color() == color {
+                object.after_mark(|header| {
+                    if (*header).get_color() == color {
+                        header
+                    } else {
+                        null_mut()
+                    }
+                });
+                true
+            } else {
+                false
+            }
+        });
 
         self.large_space.prepare_for_allocation(false);
         self.large_space.sweep();
@@ -766,6 +816,19 @@ impl GcBase for GenCon {
     type TLAB = GenConTLAB;
     const SUPPORTS_TLAB: bool = true;
     const LARGE_ALLOCATION_SIZE: usize = 16 * 1024;
+    fn allocate_weak<T: Collectable + ?Sized>(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        value: Gc<T>,
+    ) -> Weak<T> {
+        let weak_ref = Weak::create(mutator, value);
+        self.global_heap_lock.lock();
+        self.weak_refs.push(weak_ref.to_dyn());
+        unsafe {
+            self.global_heap_lock.unlock();
+        }
+        weak_ref
+    }
     #[inline]
     fn write_barrier(&mut self, _: &mut MutatorRef<Self>, object: Gc<dyn crate::api::Collectable>) {
         unsafe {

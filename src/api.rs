@@ -1,4 +1,5 @@
 use std::{
+    hint::unreachable_unchecked,
     marker::PhantomData,
     mem::{size_of, MaybeUninit},
     ops::{Deref, DerefMut},
@@ -6,7 +7,9 @@ use std::{
     sync::atomic::AtomicU16,
 };
 
-use crate::{large_space::PreciseAllocation, small_type_id, utils::*};
+use crate::{
+    gc_base::GcBase, large_space::PreciseAllocation, mutator::MutatorRef, small_type_id, utils::*,
+};
 use atomic::Ordering;
 use mopa::mopafy;
 pub unsafe trait Trace {
@@ -274,7 +277,7 @@ impl<T: Collectable + ?Sized> Gc<T> {
     pub fn to_field(self) -> Field<T> {
         Field { base: self }
     }
-
+    #[inline]
     pub fn to_dyn(self) -> Gc<dyn Collectable> {
         Gc {
             base: self.base,
@@ -286,11 +289,11 @@ impl<T: Collectable + ?Sized> Gc<T> {
     pub fn is<U: Collectable>(&self) -> bool {
         unsafe { (*self.base.as_ptr()).type_id == small_type_id::<U>() }
     }
-
+    #[inline]
     pub fn vtable(&self) -> usize {
         unsafe { (*self.base.as_ptr()).vtable() }
     }
-
+    #[inline]
     pub fn downcast<U: Collectable>(&self) -> Option<Gc<U>> {
         if self.is::<U>() {
             Some(Gc {
@@ -300,6 +303,10 @@ impl<T: Collectable + ?Sized> Gc<T> {
         } else {
             None
         }
+    }
+    #[inline]
+    pub unsafe fn downcast_unchecked<U: Collectable>(&self) -> Gc<U> {
+        self.downcast().unwrap_or_else(|| unreachable_unchecked())
     }
 
     pub fn allocation_size(&self) -> usize {
@@ -351,6 +358,11 @@ unsafe impl<T: Collectable + ?Sized> Trace for Gc<T> {
 
 pub trait Visitor {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>);
+    /// Callback to invoke when marking weak references. In most GC impls it is enough to simply invoke `mark_object`. But in some cases (e.g concurrent collector)
+    /// it might have special cases where that is not enough.
+    fn mark_weak(&mut self, root: &mut NonNull<HeapObjectHeader>) {
+        self.mark_object(root);
+    }
 }
 
 impl<T: Collectable + ?Sized> std::fmt::Pointer for Gc<T> {
@@ -462,3 +474,93 @@ unsafe impl<T: Trace, const N: usize> Trace for [T; N] {
         }
     }
 }
+
+pub struct WeakInner {
+    pub value: Option<Gc<dyn Collectable>>,
+}
+
+pub struct Weak<T: Collectable + ?Sized> {
+    value: Gc<WeakInner>,
+    marker: PhantomData<T>,
+}
+
+unsafe impl Trace for WeakInner {}
+unsafe impl Finalize for WeakInner {
+    unsafe fn finalize(&mut self) {}
+}
+
+impl Collectable for WeakInner {}
+
+unsafe impl<T: Collectable + ?Sized> Trace for Weak<T> {
+    fn trace(&mut self, vis: &mut dyn Visitor) {
+        vis.mark_weak(&mut self.value.base);
+    }
+}
+
+impl<T: Collectable + ?Sized> Weak<T> {
+    pub unsafe fn base(self) -> *mut HeapObjectHeader {
+        self.value.base.as_ptr()
+    }
+    pub unsafe fn set_base(&mut self, hdr: *mut HeapObjectHeader) {
+        self.value.base = NonNull::new_unchecked(hdr);
+    }
+    pub fn create(mutator: &mut MutatorRef<impl GcBase>, value: Gc<T>) -> Self {
+        let stack = mutator.shadow_stack();
+        letroot!(value = stack, value);
+        let mut inner = mutator.allocate(
+            WeakInner { value: None },
+            crate::gc_base::AllocationSpace::New,
+        );
+        inner.value = Some(value.to_dyn());
+        mutator.write_barrier(inner.to_dyn());
+        Self {
+            value: inner,
+            marker: PhantomData,
+        }
+    }
+    pub fn upgrade(self) -> Option<Gc<T>>
+    where
+        T: Sized,
+    {
+        self.value.value.map(|x| unsafe { x.downcast_unchecked() })
+    }
+
+    /// # NOT FOR USE BY REGULAR CODE, ONLY FOR GC IMPLEMENTATIONS!
+    ///
+    /// Must be invoked for each weak reference after marking cycle to update weak references.
+    pub unsafe fn after_mark(
+        &mut self,
+        process: impl FnOnce(*mut HeapObjectHeader) -> *mut HeapObjectHeader,
+    ) {
+        let value = self.value.value;
+        match value {
+            Some(value) => {
+                let new_header = process(value.base.as_ptr());
+                if new_header.is_null() {
+                    self.value.value = None;
+                } else {
+                    self.value.value = Some(Gc {
+                        base: NonNull::new_unchecked(new_header),
+                        marker: PhantomData,
+                    });
+                }
+            }
+            _ => (),
+        }
+    }
+
+    pub fn to_dyn(self) -> Weak<dyn Collectable> {
+        Weak {
+            value: self.value,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<T: Collectable + ?Sized> Clone for Weak<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Collectable + ?Sized> Copy for Weak<T> {}

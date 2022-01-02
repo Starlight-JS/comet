@@ -1,5 +1,5 @@
 use crate::{
-    api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, GC_BLACK, GC_WHITE},
+    api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak, GC_BLACK, GC_WHITE},
     gc_base::{AllocationSpace, GcBase},
     large_space::{LargeObjectSpace, PreciseAllocation},
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
@@ -53,8 +53,10 @@ impl ImmixAllocator {
         if self.is_out_of_memory_on_allocation(IMMIX_BLOCK_SIZE, self.emergency_collection) {
             return false;
         }
+
         match self.space.get_reusable_block() {
             block if !block.is_null() => {
+                println!("reusable {:p}", block);
                 self.line = Some(unsafe { (*block).start().add(IMMIX_LINE_SIZE) });
                 unsafe {
                     self.space.num_bytes_allocated.fetch_add(
@@ -63,7 +65,7 @@ impl ImmixAllocator {
                                 (IMMIX_LINES_PER_BLOCK - unavailable_lines as usize - 1)
                                     * IMMIX_LINE_SIZE
                             }
-                            _ => unreachable_unchecked(),
+                            _ => unreachable!(),
                         },
                         Ordering::Relaxed,
                     );
@@ -269,6 +271,7 @@ pub struct Immix {
     pub(crate) alloc_color: u8,
     pub(crate) mark_color: u8,
     total_gcs: usize,
+    weak_refs: Vec<Weak<dyn Collectable>>,
 }
 
 impl Immix {}
@@ -306,6 +309,7 @@ pub fn instantiate_immix(
         mark_color: GC_BLACK,
         mark_stack: Vec::new(),
         total_gcs: 0,
+        weak_refs: vec![],
     }));
     let href = unsafe { &mut *immix.get() };
     let join_data = JoinData::new();
@@ -343,6 +347,19 @@ impl GcBase for Immix {
     type TLAB = ImmixAllocator;
     const SUPPORTS_TLAB: bool = false;
     const LARGE_ALLOCATION_SIZE: usize = IMMIX_BLOCK_SIZE / 2;
+    fn allocate_weak<T: Collectable + ?Sized>(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        value: Gc<T>,
+    ) -> Weak<T> {
+        let weak_ref = Weak::create(mutator, value);
+        self.global_heap_lock.lock();
+        self.weak_refs.push(weak_ref.to_dyn());
+        unsafe {
+            self.global_heap_lock.unlock();
+        }
+        weak_ref
+    }
     fn alloc_inline<T: Collectable + Sized + 'static>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -399,6 +416,22 @@ impl GcBase for Immix {
                 let prev =
                     self.space.num_bytes_allocated.load(Ordering::Relaxed) + self.large_space.bytes;
                 self.space.num_bytes_allocated.store(0, Ordering::Relaxed);
+                let mark_color = self.mark_color;
+                self.weak_refs.retain_mut(|object| {
+                    let header = object.base();
+                    if (*header).get_color() == mark_color {
+                        object.after_mark(|header| {
+                            if (*header).get_color() == mark_color {
+                                header
+                            } else {
+                                null_mut()
+                            }
+                        });
+                        true
+                    } else {
+                        false
+                    }
+                });
                 self.large_space.sweep();
                 self.large_space.prepare_for_allocation(false);
                 self.space.release();
