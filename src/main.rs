@@ -1,6 +1,8 @@
 use comet_multi::{
     api::{Collectable, Finalize, Gc, Trace},
-    immix, letroot,
+    gc_base::AllocationSpace,
+    immix, letroot, marksweep,
+    safepoint::verbose_safepoint,
     shenandoah::region::ShenandoahHeapRegion,
 };
 
@@ -24,29 +26,37 @@ unsafe impl Finalize for Node {}
 impl Collectable for Node {}
 
 fn main() {
-    let opts = ShenandoahHeapRegion::setup_sizes(4 * 1024 * 1024, None, None, None);
-    println!("{:?}", opts);
-    /*let mut immix = immix::instantiate_immix(
+    let mut heap = immix::instantiate_immix(
         1024 * 1024 * 1024,
         64 * 1024 * 1024,
-        136 * 1024 * 1024,
-        256 * 1024 * 1024,
+        128 * 1024 * 1024,
+        512 * 1024 * 1024,
         true,
     );
-    let stack = immix.shadow_stack();
-    letroot!(list = stack, immix.allocate(Node::None));
     let start = std::time::Instant::now();
+    let stack = heap.shadow_stack();
+    letroot!(
+        list = stack,
+        heap.allocate(Node::None, AllocationSpace::New)
+    );
+
     let mut i = 0;
     while i < 500_000_000 {
-        *list = immix.allocate(Node::Some {
-            value: 42,
-            next: *list,
-        });
+        *list = heap.allocate(
+            Node::Some {
+                value: 42,
+                next: *list,
+            },
+            AllocationSpace::New,
+        );
         if i % 10000 == 0 {
-            *list = immix.allocate(Node::None);
+            *list = heap.allocate(Node::None, AllocationSpace::New);
+            if heap.safepoint() {
+                println!("Safepoint reached");
+            }
         }
         i += 1;
     }
 
-    println!("{:.4} seconds", start.elapsed().as_secs_f64());*/
+    println!("{:.4} seconds", start.elapsed().as_secs_f64());
 }

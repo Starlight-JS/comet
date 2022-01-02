@@ -148,7 +148,7 @@ impl ImmixSpace {
         }
     }
 
-    pub fn prepare(&self) {
+    pub fn prepare(&self, major_gc: bool) {
         self.chunk_map.visit_marked_range(
             self.map.aligned_start(),
             self.map.end(),
@@ -162,13 +162,16 @@ impl ImmixSpace {
                     }
                     (*block).set_state(BlockState::Unmarked);
                 }
-                // Clear marked lines in order for GC to recycle lines properly after GC
-                chunk.line_mark_table_mut().clear_all();
+                if major_gc {
+                    // Clear marked lines in order for GC to recycle lines properly after GC
+                    chunk.line_mark_table_mut().clear_all();
+                }
             },
         );
     }
     pub fn release(&self) {
         self.reusable_blocks.reset();
+        self.free_blocks.reset();
         self.chunk_map.visit_marked_range(
             self.map.aligned_start(),
             self.map.end(),

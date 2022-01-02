@@ -123,6 +123,7 @@ impl ImmixBlock {
 
     pub fn sweep(&mut self, space: &ImmixSpace) -> bool {
         if self.state == BlockState::Unallocated {
+            space.free_blocks.push(self as *mut Self);
             return true;
         }
         let chunk = self.chunk();

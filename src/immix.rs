@@ -1,6 +1,6 @@
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, GC_BLACK, GC_WHITE},
-    gc_base::GcBase,
+    gc_base::{AllocationSpace, GcBase},
     large_space::{LargeObjectSpace, PreciseAllocation},
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
@@ -333,7 +333,7 @@ impl Immix {
         self.collect_alloc_failure(mutator, &mut [&mut value]);
 
         mutator.tlab.emergency_collection = true;
-        let value = self.alloc_inline(mutator, value);
+        let value = self.alloc_inline(mutator, value, AllocationSpace::New);
         mutator.tlab.emergency_collection = false;
         value
     }
@@ -347,6 +347,7 @@ impl GcBase for Immix {
         &mut self,
         mutator: &mut MutatorRef<Self>,
         value: T,
+        _space: AllocationSpace,
     ) -> Gc<T> {
         let alloc = &mut mutator.tlab;
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
@@ -381,7 +382,7 @@ impl GcBase for Immix {
                 self.global_heap_lock.lock();
                 self.large_space_lock.lock();
 
-                self.space.prepare();
+                self.space.prepare(true);
                 for object in keep {
                     object.trace(self);
                 }
@@ -463,6 +464,7 @@ impl GcBase for Immix {
                 true
             }
         });
+        self.safepoint.n_mutators.fetch_sub(1, Ordering::Relaxed);
         assert!(detached, "mutator must be detached");
         unsafe {
             self.global_heap_lock.unlock();

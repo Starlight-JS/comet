@@ -11,7 +11,7 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::{
     api::{Collectable, Finalize, Gc, HeapObjectHeader, Trace},
-    gc_base::{GcBase, TLAB},
+    gc_base::{AllocationSpace, GcBase, TLAB},
     safepoint::GlobalSafepoint,
     shadow_stack::ShadowStack,
     utils::align_usize,
@@ -187,12 +187,21 @@ impl<H: GcBase> MutatorRef<H> {
     }
     /// Allocate `T` on GC heap
     #[inline(always)]
-    pub fn allocate<T: Collectable + Sized + 'static>(&mut self, value: T) -> Gc<T> {
+    pub fn allocate<T: Collectable + Sized + 'static>(
+        &mut self,
+        value: T,
+        space: AllocationSpace,
+    ) -> Gc<T> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
-        if !self.tlab.can_thread_local_allocate(size) && size >= H::LARGE_ALLOCATION_SIZE {
-            return self.allocate_slow(value, size);
-        } else if !self.tlab.can_thread_local_allocate(size) || !H::SUPPORTS_TLAB {
-            return self.allocate_inline(value, size);
+        if (!self.tlab.can_thread_local_allocate(size) && size >= H::LARGE_ALLOCATION_SIZE)
+            || space == AllocationSpace::Large
+        {
+            return self.allocate_slow(value, size, space);
+        } else if !self.tlab.can_thread_local_allocate(size)
+            || !H::SUPPORTS_TLAB
+            || space == AllocationSpace::Old
+        {
+            return self.allocate_inline(value, size, space);
         }
 
         let result = self.tlab.allocate(value);
@@ -202,7 +211,7 @@ impl<H: GcBase> MutatorRef<H> {
                 self.heap_ref().post_alloc(value);
                 value
             }
-            Err(value) => self.allocate_slow(value, size),
+            Err(value) => self.allocate_slow(value, size, space),
         }
     }
 
@@ -211,9 +220,10 @@ impl<H: GcBase> MutatorRef<H> {
         &mut self,
         mut value: T,
         size: usize,
+        space: AllocationSpace,
     ) -> Gc<T> {
         let heap = unsafe { &mut *self.heap.get() };
-        if size >= H::LARGE_ALLOCATION_SIZE {
+        if size >= H::LARGE_ALLOCATION_SIZE || space == AllocationSpace::Large {
             heap.allocate_large(self, value)
         } else if self.tlab.can_thread_local_allocate(size) && H::SUPPORTS_TLAB {
             // try to refill tlab if gc supports tlab
@@ -227,10 +237,10 @@ impl<H: GcBase> MutatorRef<H> {
                 }
             }
             // must not fail
-            self.allocate(value)
+            self.allocate(value, space)
         } else {
             // this path should be reached only when `H::SUPPORTS_TLAB` returns true and `size` is `>= H::TLAB::LARGE_OBJECT_SIZE`
-            self.allocate_inline(value, size)
+            self.allocate_inline(value, size, space)
         }
     }
 
@@ -242,9 +252,10 @@ impl<H: GcBase> MutatorRef<H> {
         &mut self,
         value: T,
         _size: usize,
+        space: AllocationSpace,
     ) -> Gc<T> {
         let href = unsafe { &mut *self.heap.get() };
-        let val = href.alloc_inline(self, value);
+        let val = href.alloc_inline(self, value, space);
         val
     }
 }

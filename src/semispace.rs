@@ -3,7 +3,7 @@ use std::{cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, syn
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor},
     bump_pointer_space::BumpPointerSpace,
-    gc_base::GcBase,
+    gc_base::{AllocationSpace, GcBase},
     large_space::{LargeObjectSpace, PreciseAllocation},
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
@@ -90,6 +90,7 @@ impl GcBase for SemiSpace {
         &mut self,
         mutator: &mut MutatorRef<Self>,
         mut value: T,
+        _: AllocationSpace,
     ) -> crate::api::Gc<T> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         let mut memory = self.to_space.bump_alloc(size);
@@ -137,6 +138,7 @@ impl GcBase for SemiSpace {
                 true
             }
         });
+        self.safepoint.n_mutators.fetch_sub(1, Ordering::Relaxed);
         assert!(detached, "mutator must be detached");
         unsafe {
             self.global_heap_lock.unlock();

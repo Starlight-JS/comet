@@ -1,8 +1,10 @@
 use crate::api::vtable_of;
+use crate::api::Collectable;
 use crate::api::Gc;
 use crate::api::GC_BLACK;
 use crate::api::GC_GREY;
 use crate::api::GC_WHITE;
+use crate::gc_base::AllocationSpace;
 use crate::gc_base::GcBase;
 use crate::gc_base::TLAB;
 use crate::large_space::LargeObjectSpace;
@@ -23,7 +25,9 @@ use atomic::Atomic;
 use atomic::Ordering;
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 use rosalloc::dedicated_full_run;
+use rosalloc::Rosalloc;
 use rosalloc::Run;
+use rosalloc::NUM_OF_SLOTS;
 //use rosalloc::defs::NUM_THREAD_LOCAL_SIZE_BRACKETS;
 use rosalloc::defs::NUM_THREAD_LOCAL_SIZE_BRACKETS;
 //use rosalloc::Run;
@@ -92,6 +96,7 @@ pub struct GenCon {
     gc_state: Atomic<MajorPhase>,
     alloc_color: u8,
     mark_color: u8,
+    growth_limit: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -176,6 +181,7 @@ impl GenCon {
         );
 
         let mut this = Self {
+            growth_limit,
             alloc_color: GC_WHITE,
             old_mark_stack: Vec::new(),
             mark_color: GC_BLACK,
@@ -551,6 +557,172 @@ impl GenCon {
         self.remembered_set.push(object);
         self.rem_set_lock.unlock();
     }
+
+    #[inline]
+    fn alloc_inline_old<T: crate::api::Collectable + Sized + 'static>(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        value: T,
+        _space: AllocationSpace,
+    ) -> Gc<T> {
+        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
+        if Rosalloc::is_size_for_thread_local(size) {
+            let (idx, _bracket_size) = Rosalloc::size_to_index_and_bracket_size(size);
+            unsafe {
+                let thread_local_run = &mut *mutator.tlab.runs[idx];
+
+                let slot_addr = (*thread_local_run).alloc_slot();
+                if slot_addr.is_null() {
+                    return self.alloc_once::<T, false, true>(mutator, value);
+                }
+
+                let header = slot_addr.cast::<HeapObjectHeader>();
+                header.write(HeapObjectHeader {
+                    type_id: small_type_id::<T>(),
+                    padding: 0,
+                    padding2: 0,
+                    value: 0,
+                });
+                (*header).set_vtable(vtable_of::<T>());
+                (*header).set_size(size);
+                ((*header).data() as *mut T).write(value);
+                Gc {
+                    base: NonNull::new_unchecked(header),
+                    marker: PhantomData,
+                }
+            }
+        } else {
+            self.alloc_once::<T, false, true>(mutator, value)
+        }
+    }
+
+    #[inline]
+    fn alloc_inline_new<T: crate::api::Collectable + Sized + 'static>(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        mut value: T,
+        _space: AllocationSpace,
+    ) -> Gc<T> {
+        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
+        let mut memory = self.nursery.bump_alloc(size);
+        if memory.is_null() {
+            self.collect_alloc_failure(mutator, &mut [&mut value]);
+
+            //self.collect(mutator, &mut [&mut value]);
+            memory = self.nursery.bump_alloc(size);
+            if memory.is_null() {
+                oom_abort();
+            }
+        }
+
+        unsafe {
+            let hdr = memory.cast::<HeapObjectHeader>();
+            (*hdr).set_vtable(vtable_of::<T>());
+            (*hdr).set_size(size);
+
+            ((*hdr).data() as *mut T).write(value);
+            Gc {
+                base: NonNull::new_unchecked(hdr),
+                marker: Default::default(),
+            }
+        }
+    }
+    #[cold]
+    pub fn alloc_slow<T: Collectable + Sized + 'static>(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        mut value: T,
+    ) -> Gc<T> {
+        self.full_collection(mutator, &mut [&mut value]);
+        self.alloc_once::<T, true, false>(mutator, value)
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub fn alloc_once<T: Collectable + Sized + 'static, const GROW: bool, const GC: bool>(
+        &mut self,
+        mut mutator: &mut MutatorRef<Self>,
+        value: T,
+    ) -> Gc<T> {
+        fn max_bytes_bulk_allocated_for(size: usize) -> usize {
+            if !Rosalloc::is_size_for_thread_local(size) {
+                return size;
+            }
+            let (idx, bracket_size) = Rosalloc::size_to_index_and_bracket_size(size);
+            NUM_OF_SLOTS[idx] * bracket_size
+        }
+        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
+        let max_bytes_tl_bulk_allocated = max_bytes_bulk_allocated_for(size);
+        if self.is_out_of_memory_on_allocation(max_bytes_tl_bulk_allocated, GROW) {
+            // potentially run GC if we reached GC threshold
+
+            return self.alloc_slow(mutator, value);
+        }
+        let mut bytes_allocated = 0;
+        let mut usable_size = 0;
+        let mut bytes_tl_bulk_allocated = 0;
+        unsafe {
+            let mem = (*self.old_space).alloc_common::<Self, true>(
+                &mut mutator,
+                size,
+                &mut bytes_allocated,
+                &mut usable_size,
+                &mut bytes_tl_bulk_allocated,
+            );
+            if mem.is_null() && GC {
+                // trigger GC if no memory is available
+                return self.alloc_slow(mutator, value);
+            } else if mem.is_null() && !GC {
+                // if GC hapenned and memory is still unavailbe just OOM
+                oom_abort();
+            }
+            if bytes_tl_bulk_allocated > 0 {
+                // update num_bytes_allocated so we can start GC when necessary
+                self.num_old_space_allocated
+                    .fetch_add(bytes_tl_bulk_allocated, Ordering::Relaxed);
+            }
+
+            let header = mem.cast::<HeapObjectHeader>();
+            (*header).set_vtable(vtable_of::<T>());
+            (*header).set_size(size);
+            ((*header).data() as *mut T).write(value);
+
+            Gc {
+                base: NonNull::new_unchecked(header),
+                marker: PhantomData,
+            }
+        }
+    }
+
+    #[inline]
+    fn is_out_of_memory_on_allocation(&self, alloc_size: usize, grow: bool) -> bool {
+        let mut old_target = self.next_major_collection_threshold.load(Ordering::Relaxed);
+        loop {
+            let old_allocated = self.num_old_space_allocated.load(Ordering::Relaxed);
+            let new_footprint = old_allocated + alloc_size;
+            if new_footprint <= old_target {
+                return false;
+            } else if new_footprint > self.growth_limit {
+                return true;
+            }
+
+            if grow {
+                if let Err(t) = self.next_major_collection_threshold.compare_exchange_weak(
+                    old_target,
+                    new_footprint,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    old_target = t;
+                    //return false;
+                } else {
+                    return false;
+                }
+            } else {
+                return true;
+            }
+        }
+    }
 }
 
 #[cold]
@@ -687,30 +859,13 @@ impl GcBase for GenCon {
     fn alloc_inline<T: crate::api::Collectable + Sized + 'static>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
-        mut value: T,
+        value: T,
+        space: AllocationSpace,
     ) -> crate::api::Gc<T> {
-        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
-        let mut memory = self.nursery.bump_alloc(size);
-        if memory.is_null() {
-            self.collect_alloc_failure(mutator, &mut [&mut value]);
-
-            //self.collect(mutator, &mut [&mut value]);
-            memory = self.nursery.bump_alloc(size);
-            if memory.is_null() {
-                oom_abort();
-            }
-        }
-
-        unsafe {
-            let hdr = memory.cast::<HeapObjectHeader>();
-            (*hdr).set_vtable(vtable_of::<T>());
-            (*hdr).set_size(size);
-
-            ((*hdr).data() as *mut T).write(value);
-            Gc {
-                base: NonNull::new_unchecked(hdr),
-                marker: Default::default(),
-            }
+        match space {
+            AllocationSpace::New => self.alloc_inline_new(mutator, value, space),
+            AllocationSpace::Old => self.alloc_inline_old(mutator, value, space),
+            _ => unreachable!(),
         }
     }
     #[inline(always)]

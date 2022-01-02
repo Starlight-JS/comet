@@ -1,4 +1,5 @@
 use crate::bitmap::SpaceBitmap;
+use crate::gc_base::AllocationSpace;
 use crate::rosalloc_space::{RosAllocSpace, RosAllocTLAB};
 use crate::utils::formatted_size;
 use crate::{
@@ -34,6 +35,8 @@ pub struct MarkSweep<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> {
     max_free: usize,
     min_free: usize,
     pool: scoped_threadpool::Pool,
+    verbose: bool,
+    total_gcs: usize,
 }
 fn max_bytes_bulk_allocated_for(size: usize) -> usize {
     if !Rosalloc::is_size_for_thread_local(size) {
@@ -43,7 +46,7 @@ fn max_bytes_bulk_allocated_for(size: usize) -> usize {
     NUM_OF_SLOTS[idx] * bracket_size
 }
 
-pub fn instantiate_marksweep<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool>(
+pub fn instantiate_marksweep(
     initial_size: usize,
     growth_limit: usize,
     min_free: usize,
@@ -52,7 +55,8 @@ pub fn instantiate_marksweep<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool>(
     capacity: usize,
     low_memory_mode: bool,
     num_threads: usize,
-) -> MutatorRef<MarkSweep<VERBOSE_GC, VERBOSE_ALLOC>> {
+    verbose: bool,
+) -> MutatorRef<MarkSweep<false, false>> {
     let heap = Arc::new(UnsafeCell::new(MarkSweep::new(
         initial_size,
         growth_limit,
@@ -62,6 +66,7 @@ pub fn instantiate_marksweep<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool>(
         capacity,
         low_memory_mode,
         num_threads,
+        verbose,
     )));
     let href = unsafe { &mut *heap.get() };
     let join_data = JoinData::new();
@@ -93,6 +98,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VE
         capacity: usize,
         low_memory_mode: bool,
         num_threads: usize,
+        verbose: bool,
     ) -> Self {
         let growth_limit = capacity.min(growth_limit);
         let rosalloc = RosAllocSpace::create(
@@ -104,6 +110,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VE
             false,
         );
         let this = Self {
+            total_gcs: 0,
             global_heap_lock: Lock::INIT,
             large_space_lock: Lock::INIT,
             live_bitmap: unsafe { (*rosalloc).get_live_bitmap() },
@@ -119,6 +126,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VE
             num_bytes_allocated: AtomicUsize::new(0),
             growth_multiplier,
             pool: scoped_threadpool::Pool::new(num_threads as _),
+            verbose,
         };
         unsafe {
             (*(*this.rosalloc).rosalloc()).set_footprint_limit((*this.rosalloc).capacity());
@@ -241,6 +249,11 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
             Some(safepoint) => {
                 self.global_heap_lock.lock();
                 self.large_space_lock.lock();
+                let time = if self.verbose {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 if VERBOSE_GC {
                     eprintln!("MarkSweep: collection started");
                     eprintln!(
@@ -248,6 +261,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
                         formatted_size(self.num_bytes_allocated.load(Ordering::Relaxed))
                     );
                 }
+                let prev = self.num_bytes_allocated.load(Ordering::Relaxed);
                 self.large_space.prepare_for_marking(false);
                 for i in 0..self.mutators.len() {
                     unsafe {
@@ -317,19 +331,17 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
                 grow_bytes = delta.min(self.max_free);
                 grow_bytes = grow_bytes.max(self.min_free);
                 target_size = bytes_allocated + (grow_bytes as f64 * 2.0) as usize;
-                if VERBOSE_GC {
+                if let Some(time) = time.map(|x| x.elapsed()) {
                     eprintln!(
-                        "MarkSweep: New target footprint: {}",
-                        formatted_size(target_size)
+                        "[gc] GC({}) Pause MarkSweep {}->{}({}) {:.4}ms",
+                        self.total_gcs,
+                        formatted_size(prev),
+                        formatted_size(bytes_allocated),
+                        formatted_size(target_size),
+                        time.as_micros() as f64 / 1000.0
                     );
-                    eprintln!(
-                        "MarkSweep: num_bytes_allocated={}",
-                        formatted_size(self.num_bytes_allocated.load(Ordering::Relaxed))
-                    );
-
-                    eprintln!("MarkSweep: collection finished");
+                    self.total_gcs += 1;
                 }
-
                 self.large_space.prepare_for_allocation(false);
                 self.target_footprint.store(target_size, Ordering::Relaxed);
                 drop(safepoint);
@@ -348,6 +360,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
         &mut self,
         mutator: &mut MutatorRef<Self>,
         value: T,
+        _space: AllocationSpace,
     ) -> Gc<T> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         if Rosalloc::is_size_for_thread_local(size) {

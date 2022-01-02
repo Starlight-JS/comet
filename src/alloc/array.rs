@@ -2,7 +2,7 @@ use std::mem::size_of;
 
 use crate::{
     api::{Collectable, Finalize, Gc, Trace},
-    gc_base::GcBase,
+    gc_base::{AllocationSpace, GcBase},
     mutator::{Mutator, MutatorRef},
 };
 
@@ -20,11 +20,14 @@ impl<T: Trace + 'static> Array<T> {
     ) -> Gc<Self> {
         let stack = mutator.shadow_stack();
         letroot!(init = stack, Some(slice));
-        let mut this = mutator.allocate(Self {
-            length: init.as_ref().unwrap().len() as _,
-            is_inited: false,
-            values: [],
-        });
+        let mut this = mutator.allocate(
+            Self {
+                length: init.as_ref().unwrap().len() as _,
+                is_inited: false,
+                values: [],
+            },
+            AllocationSpace::New,
+        );
         unsafe {
             std::ptr::copy_nonoverlapping(
                 init.as_ref().unwrap().as_ptr(),

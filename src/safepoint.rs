@@ -1,4 +1,7 @@
-use std::{cell::Cell, sync::atomic::AtomicU32};
+use std::{
+    cell::Cell,
+    sync::atomic::{AtomicBool, AtomicU32},
+};
 
 use atomic::Ordering;
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
@@ -7,6 +10,12 @@ use crate::{
     gc_base::GcBase,
     mutator::{MutatorRef, ThreadState},
 };
+
+static SAFEPOINT_VERBOSE: AtomicBool = AtomicBool::new(false);
+
+pub fn verbose_safepoint(x: bool) {
+    SAFEPOINT_VERBOSE.store(x, Ordering::Relaxed);
+}
 
 pub struct GlobalSafepoint {
     pub(crate) safepoint_lock: Lock,
@@ -37,10 +46,12 @@ impl GlobalSafepoint {
     }
 
     pub fn start(&self) -> bool {
-        if self.n_mutators.load(atomic::Ordering::Relaxed) == 1 {
-            self.gc_running.store(1, atomic::Ordering::Relaxed);
-            return true;
-        }
+        let verbose = SAFEPOINT_VERBOSE.load(Ordering::Relaxed);
+        let start = if verbose {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         self.safepoint_lock.lock();
         let running = 0;
         // In case multiple threads enter the GC at the same time, only allow
@@ -64,6 +75,13 @@ impl GlobalSafepoint {
         self.enable();
         unsafe {
             self.safepoint_lock.unlock();
+        }
+        if let Some(time) = start.map(|x| x.elapsed()) {
+            eprintln!(
+                "[safepoint] {} mutators reached safepoint in {:.4}ms",
+                self.n_mutators.load(Ordering::Relaxed),
+                time.as_micros() as f64 / 1000.0
+            );
         }
         true
     }
@@ -210,6 +228,7 @@ mod tests {
         const RUNS: usize = 5;
         const SAFEPOINTS: usize = 3;
         let mut safepoint_count = 0;
+        super::verbose_safepoint(true);
         let mutator = semispace::instantiate_semispace(128 * 1024);
         for _ in 0..RUNS {
             let counter = Arc::new(AtomicU32::new(0));

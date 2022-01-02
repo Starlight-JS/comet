@@ -273,6 +273,7 @@ impl<H: GcBase<TLAB = Self>> TLAB<H> for RosAllocTLAB {
             });
             (*header).set_vtable(vtable_of::<T>());
             (*header).set_size(size);
+            ((*header).data() as *mut T).write(value);
             Ok(Gc {
                 base: NonNull::new_unchecked(header),
                 marker: PhantomData,

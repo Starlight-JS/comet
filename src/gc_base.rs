@@ -8,6 +8,14 @@ use crate::{
     safepoint::GlobalSafepoint,
 };
 
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum AllocationSpace {
+    New,
+    Old,
+    Large,
+}
+
 pub trait GcBase: Sized {
     const LARGE_ALLOCATION_SIZE: usize = 16 * 1024;
     const SUPPORTS_TLAB: bool = false;
@@ -48,6 +56,7 @@ pub trait GcBase: Sized {
         &mut self,
         mutator: &mut MutatorRef<Self>,
         value: T,
+        space: AllocationSpace,
     ) -> Gc<T>;
 
     /// Post allocation operation e.g set mark in bitmap that this object was allocated.

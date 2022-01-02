@@ -2,7 +2,7 @@
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, GC_BLACK, GC_GREY},
     bump_pointer_space::BumpPointerSpace,
-    gc_base::{GcBase, TLAB},
+    gc_base::{AllocationSpace, GcBase, TLAB},
     mutator::{oom_abort, Mutator, MutatorRef},
     safepoint::GlobalSafepoint,
     small_type_id,
@@ -185,6 +185,7 @@ impl GcBase for ConcSemispace {
         &mut self,
         mutator: &mut MutatorRef<Self>,
         mut value: T,
+        _: AllocationSpace,
     ) -> crate::api::Gc<T> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         let mut memory = self.to_space.bump_alloc(size);
@@ -258,7 +259,7 @@ impl GcBase for ConcSemispace {
         mutator: &mut MutatorRef<Self>,
         value: T,
     ) -> crate::api::Gc<T> {
-        self.alloc_inline(mutator, value)
+        self.alloc_inline(mutator, value, AllocationSpace::Large)
     }
     fn collect(&mut self, _mutator: &mut MutatorRef<Self>, _keep: &mut [&mut dyn Trace]) {
         /*match SafepointScope::new(mutator.clone()) {
