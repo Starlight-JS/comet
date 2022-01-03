@@ -14,10 +14,7 @@ use crate::{
 };
 use atomic::Ordering;
 use rosalloc::defs::PAGE_SIZE;
-use std::{
-    cell::UnsafeCell, hint::unreachable_unchecked, marker::PhantomData, mem::size_of, ptr::NonNull,
-    sync::Arc,
-};
+use std::{cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc};
 use std::{
     ptr::null_mut,
     sync::atomic::{AtomicPtr, AtomicUsize},

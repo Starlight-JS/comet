@@ -1,4 +1,4 @@
-#![feature(new_uninit, const_type_id, vec_retain_mut)]
+#![feature(new_uninit, const_type_id, vec_retain_mut, thread_local)]
 #[macro_use]
 pub mod shadow_stack;
 #[macro_use]
@@ -12,6 +12,7 @@ pub mod card_table;
 pub mod concurrent_semispace;
 pub mod gc_base;
 pub mod generational;
+pub mod global;
 pub mod immix;
 pub mod large_space;
 pub mod marksweep;

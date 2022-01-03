@@ -12,11 +12,51 @@ use crate::{
 };
 use atomic::Ordering;
 use mopa::mopafy;
+
+/// Indicates that a type can be traced by a garbage collector.
+///
+/// This doesn't necessarily mean that the type is safe to allocate in a garbage collector ([Collectable]).
+///
+/// ## Safety
+/// See the documentation of the `trace` method for more info.
+/// Essentially, this object must faithfully trace anything that
+/// could contain garbage collected pointers or other `Trace` items.
 pub unsafe trait Trace {
+    /// Trace each field in this type.
+    ///
+    /// Structures should trace each of their fields,
+    /// and collections should trace each of their elements.
+    ///
+    /// ### Safety
+    /// Some types (like `Gc`) need special actions taken when they're traced,
+    /// but those are somewhat rare and are usually already provided by the garbage collector.
+    ///
+    /// Behavior is restricted during tracing:
+    /// ## Permitted Behavior
+    /// - Reading your own memory (includes iteration)
+    ///   - Interior mutation is undefined behavior, even if you use `RefCell`
+    /// - Calling `Visitor::mark_object`
+    ///   
+    /// - Panicking on unrecoverable errors
+    ///   - This should be reserved for cases where you are seriously screwed up,
+    ///       and can't fulfill your contract to trace your interior properly.
+    ///     - One example is `Gc<T>` which panics if the garbage collectors are mismatched
+    ///   - Garbage collectors may chose to [abort](std::process::abort) if they encounter a panic,
+    ///     so you should avoid doing it if possible.
+    /// ## Never Permitted Behavior
+    /// - Forgetting a element of a collection, or field of a structure
+    ///   - If you forget an element undefined behavior will result
+    ///   - This is why you should always prefer automatically derived implementations where possible.
+    ///     - With an automatically derived implementation you will never miss a field
+    /// - It is undefined behavior to mutate any of your own data.
+    ///   - The mutable `&mut self` is just so copying collectors can relocate GC pointers
+    /// - Calling other operations on the garbage collector (including allocations)
     fn trace(&mut self, _vis: &mut dyn Visitor) {}
 }
-
+/// Indicates type that can be allocated on garbage collector heap.
 pub trait Collectable: Trace + Finalize + mopa::Any {
+    /// Function to compute value size on allocation. If type is dyn sized (i.e array or string) this function must be overloaded
+    /// to calculate allocation size properly. It is invoked exactly once at allocation time.
     #[inline(always)]
     fn allocation_size(&self) -> usize {
         std::mem::size_of_val(self)
@@ -35,16 +75,22 @@ pub const GC_WHITE: u8 = 0;
 pub const GC_BLACK: u8 = 1;
 pub const GC_GREY: u8 = 2;
 
+/// HeapObjectHeader contains meta data per object and is prepended to each
+/// object.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct HeapObjectHeader {
+    /// First 64 bit word of header. It stores object vtable that contains [Trace::trace] and [Finalize::finalize] methods.
     pub value: u64,
-
+    /// Metadata stored there depends strictly on GC type
     pub padding: u16,
+    /// Metadata stored there depends strictly on GC type
     pub padding2: u16,
+    /// TypeId of allocated type that is again hashed by 32 bit hasher so object header is 2 words on 64 bit platforms.
     pub type_id: u32,
 }
 
+/// Minimal allocation size in GC heap.
 pub const MIN_ALLOCATION: usize = 8;
 
 impl HeapObjectHeader {
@@ -260,7 +306,15 @@ pub(crate) fn vtable_of_trace<T: Trace>() -> usize {
     let x = null_mut::<T>();
     unsafe { std::mem::transmute::<_, mopa::TraitObject>(x as *mut dyn Trace).vtable as _ }
 }
-
+/// A garbage collected pointer to a value.
+///
+/// This is the equivalent of a garbage collected smart-pointer.
+///
+///
+/// The smart pointer is simply a guarantee to the garbage collector
+/// that this points to a garbage collected object with the correct header,
+/// and not some arbitrary bits that you've decided to heap allocate.
+///
 pub struct Gc<T: Collectable + ?Sized> {
     pub(crate) base: NonNull<HeapObjectHeader>,
     pub(crate) marker: PhantomData<T>,
@@ -274,9 +328,7 @@ impl<T: Collectable + Sized> Gc<MaybeUninit<T>> {
     }
 }
 impl<T: Collectable + ?Sized> Gc<T> {
-    pub fn to_field(self) -> Field<T> {
-        Field { base: self }
-    }
+    /// Coerce this GC pointer to dyn Collectable.
     #[inline]
     pub fn to_dyn(self) -> Gc<dyn Collectable> {
         Gc {
@@ -284,15 +336,17 @@ impl<T: Collectable + ?Sized> Gc<T> {
             marker: PhantomData,
         }
     }
-
+    /// Check if this GC pointer is of type `U`
     #[inline(always)]
     pub fn is<U: Collectable>(&self) -> bool {
         unsafe { (*self.base.as_ptr()).type_id == small_type_id::<U>() }
     }
+    /// Get type vtable
     #[inline]
     pub fn vtable(&self) -> usize {
         unsafe { (*self.base.as_ptr()).vtable() }
     }
+    /// Try to downcast this reference to `U`
     #[inline]
     pub fn downcast<U: Collectable>(&self) -> Option<Gc<U>> {
         if self.is::<U>() {
@@ -304,11 +358,16 @@ impl<T: Collectable + ?Sized> Gc<T> {
             None
         }
     }
+
+    /// Unchecked downcast
+    ///
+    /// # Safety
+    /// Unsafe to call because does not check for type
     #[inline]
     pub unsafe fn downcast_unchecked<U: Collectable>(&self) -> Gc<U> {
         self.downcast().unwrap_or_else(|| unreachable_unchecked())
     }
-
+    /// Returns number of bytes that this GC pointer uses on the heap.
     pub fn allocation_size(&self) -> usize {
         unsafe {
             let base = &*self.base.as_ptr();
@@ -478,7 +537,14 @@ unsafe impl<T: Trace, const N: usize> Trace for [T; N] {
 pub struct WeakInner {
     pub value: Option<Gc<dyn Collectable>>,
 }
-
+/// Weak reference objects, which do not prevent their referents from being made finalizable, finalized, and then reclaimed. Weak references are most often used to implement canonicalizing mappings.
+///
+///
+/// Suppose that the garbage collector determines at a certain point in time that an object is weakly reachable.
+/// At that time it will atomically clear all weak references to that object and all weak references to any other weakly-reachable objects from which
+/// that object is reachable through a chain of strong and soft references.
+/// At the same time it will declare all of the formerly weakly-reachable objects to be finalizable.
+/// At the same time or at some later time it will enqueue those newly-cleared weak references that are registered with reference queues.
 pub struct Weak<T: Collectable + ?Sized> {
     value: Gc<WeakInner>,
     marker: PhantomData<T>,
@@ -504,6 +570,7 @@ impl<T: Collectable + ?Sized> Weak<T> {
     pub unsafe fn set_base(&mut self, hdr: *mut HeapObjectHeader) {
         self.value.base = NonNull::new_unchecked(hdr);
     }
+    /// Creates a new weak reference that refers to the given object.
     pub fn create(mutator: &mut MutatorRef<impl GcBase>, value: Gc<T>) -> Self {
         let stack = mutator.shadow_stack();
         letroot!(value = stack, value);
@@ -518,6 +585,14 @@ impl<T: Collectable + ?Sized> Weak<T> {
             marker: PhantomData,
         }
     }
+    /// Clears this reference object.
+    ///
+    ///
+    /// This method is invoked only by mutator code; when the garbage collector clears references it does so directly, without invoking this method.
+    pub fn clear(mut self) {
+        self.value.value = None;
+    }
+    /// Returns this weak reference object's referent. If this reference object has been cleared, either by the program or by the garbage collector, then this method returns `None`.
     pub fn upgrade(self) -> Option<Gc<T>>
     where
         T: Sized,
