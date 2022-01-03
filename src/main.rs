@@ -2,6 +2,7 @@ use comet_multi::{
     alloc::array::Array,
     api::{Collectable, Finalize, Gc, Trace},
     gc_base::AllocationSpace,
+    gc_vector,
     generational::{instantiate_gencon, GenConOptions},
     immix, letroot,
 };
@@ -34,13 +35,7 @@ fn main() {
         true,
     );
 
-    let stack = heap.shadow_stack();
-    letroot!(x = stack, Array::from_slice(&mut heap, [1i32; 64]));
-    println!("{}", x.allocation_size());
-    println!("{:?}", **x);
+    let vec = gc_vector!(heap; [0; 10]);
 
-    heap.collect(&mut []);
-    let y = heap.allocate(42i32, AllocationSpace::New);
-    println!("{:p}", *x);
-    println!("{:p}", y);
+    println!("{}", vec.at(4));
 }

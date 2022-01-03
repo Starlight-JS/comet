@@ -3,6 +3,7 @@
 pub mod shadow_stack;
 #[macro_use]
 pub mod utils;
+#[macro_use]
 pub mod alloc;
 pub mod api;
 pub mod bitmap;
