@@ -49,7 +49,10 @@ fn main() {
                     AllocationSpace::New,
                 );
 
-                if i % 8192 == 0 {
+                if i % (8 * 1024) == 0 {
+                    if mutator.safepoint() {
+                        println!("{:?} reached safepoint", std::thread::current().id());
+                    }
                     *list = mutator.allocate(Node::None, AllocationSpace::New);
                 }
                 i += 1;
