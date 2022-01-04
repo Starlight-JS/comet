@@ -1,6 +1,6 @@
 use crate::api::Weak;
 use crate::bitmap::SpaceBitmap;
-use crate::gc_base::AllocationSpace;
+use crate::gc_base::{AllocationSpace, MarkingConstraint, MarkingConstraintRuns};
 use crate::rosalloc_space::{RosAllocSpace, RosAllocTLAB};
 use crate::utils::formatted_size;
 use crate::{
@@ -20,7 +20,7 @@ use std::sync::atomic::AtomicUsize;
 use std::{cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc};
 
 #[repr(C)]
-pub struct MarkSweep<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> {
+pub struct MarkSweep {
     pub(crate) global_heap_lock: Lock,
     pub(crate) large_space_lock: Lock,
     live_bitmap: *const SpaceBitmap<8>,
@@ -39,6 +39,7 @@ pub struct MarkSweep<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> {
     verbose: bool,
     total_gcs: usize,
     weak_refs: Vec<Weak<dyn Collectable>>,
+    constraints: Vec<Box<dyn MarkingConstraint>>,
 }
 fn max_bytes_bulk_allocated_for(size: usize) -> usize {
     if !Rosalloc::is_size_for_thread_local(size) {
@@ -58,7 +59,7 @@ pub fn instantiate_marksweep(
     low_memory_mode: bool,
     num_threads: usize,
     verbose: bool,
-) -> MutatorRef<MarkSweep<false, false>> {
+) -> MutatorRef<MarkSweep> {
     let heap = Arc::new(UnsafeCell::new(MarkSweep::new(
         initial_size,
         growth_limit,
@@ -90,7 +91,33 @@ pub const MS_DEFAULT_MAXIMUM_SIZE: usize = 256 * 1024 * 1024;
 pub const MS_DEFAULT_MAX_FREE: usize = 2 * 1024 * 1024;
 pub const MS_DEFAULT_MIN_FREE: usize = MS_DEFAULT_MAX_FREE / 4;
 
-impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VERBOSE_ALLOC> {
+impl MarkSweep {
+    unsafe fn after_mark_constraints(&mut self) {
+        let this = self as *mut Self;
+        (*this).constraints.retain_mut(|constraint| {
+            if constraint.is_over() {
+                false
+            } else {
+                if constraint.runs_at() == MarkingConstraintRuns::AfterMark {
+                    constraint.run(self);
+                }
+                true
+            }
+        });
+    }
+    unsafe fn before_mark_constraints(&mut self) {
+        let this = self as *mut Self;
+        (*this).constraints.retain_mut(|constraint| {
+            if constraint.is_over() {
+                false
+            } else {
+                if constraint.runs_at() == MarkingConstraintRuns::BeforeMark {
+                    constraint.run(self);
+                }
+                true
+            }
+        });
+    }
     pub fn new(
         initial_size: usize,
         growth_limit: usize,
@@ -113,6 +140,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VE
         );
         let this = Self {
             total_gcs: 0,
+            constraints: vec![],
             global_heap_lock: Lock::INIT,
             large_space_lock: Lock::INIT,
             live_bitmap: unsafe { (*rosalloc).get_live_bitmap() },
@@ -187,12 +215,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VE
         let max_bytes_tl_bulk_allocated = max_bytes_bulk_allocated_for(size);
         if self.is_out_of_memory_on_allocation(max_bytes_tl_bulk_allocated, GROW) {
             // potentially run GC if we reached GC threshold
-            if VERBOSE_ALLOC {
-                eprintln!(
-                    "MarkSweep: out of memory on allocation of size: {}",
-                    formatted_size(size)
-                );
-            }
+
             return self.alloc_slow(mutator, value);
         }
         let mut bytes_allocated = 0;
@@ -214,12 +237,6 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VE
                 oom_abort();
             }
             if bytes_tl_bulk_allocated > 0 {
-                if VERBOSE_ALLOC {
-                    eprintln!(
-                        "MarkSweep: bulk allocated: {}, increasing num_bytes_allocated",
-                        formatted_size(bytes_tl_bulk_allocated)
-                    );
-                }
                 // update num_bytes_allocated so we can start GC when necessary
                 self.num_bytes_allocated
                     .fetch_add(bytes_tl_bulk_allocated, Ordering::Relaxed);
@@ -238,11 +255,16 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> MarkSweep<VERBOSE_GC, VE
     }
 }
 
-impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
-    for MarkSweep<VERBOSE_GC, VERBOSE_ALLOC>
-{
+impl GcBase for MarkSweep {
     type TLAB = RosAllocTLAB;
     const SUPPORTS_TLAB: bool = false;
+
+    fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T) {
+        self.global_lock();
+        self.constraints.push(Box::new(constraint));
+        self.global_unlock();
+    }
+
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -256,13 +278,9 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
         }
         weak_ref
     }
-    fn collect(
-        &mut self,
-        mutator: &mut MutatorRef<MarkSweep<VERBOSE_GC, VERBOSE_ALLOC>>,
-        mut keep: &mut [&mut dyn Trace],
-    ) {
+    fn collect(&mut self, mutator: &mut MutatorRef<MarkSweep>, mut keep: &mut [&mut dyn Trace]) {
         match SafepointScope::new(mutator.clone()) {
-            Some(safepoint) => {
+            Some(safepoint) => unsafe {
                 self.global_heap_lock.lock();
                 self.large_space_lock.lock();
                 let time = if self.verbose {
@@ -270,76 +288,69 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
                 } else {
                     None
                 };
-                if VERBOSE_GC {
-                    eprintln!("MarkSweep: collection started");
-                    eprintln!(
-                        "MarkSweep: num_bytes_allocated={}",
-                        formatted_size(self.num_bytes_allocated.load(Ordering::Relaxed))
-                    );
-                }
+
                 let prev = self.num_bytes_allocated.load(Ordering::Relaxed);
                 self.large_space.prepare_for_marking(false);
+                self.before_mark_constraints();
                 for i in 0..self.mutators.len() {
-                    unsafe {
-                        let mutator = self.mutators[i];
-                        //fill_region((*mutator).tlab.cursor, (*mutator).tlab_end);
+                    let mutator = self.mutators[i];
+                    //fill_region((*mutator).tlab.cursor, (*mutator).tlab_end);
 
-                        //  (*mutator).reset_tlab();
+                    //  (*mutator).reset_tlab();
 
-                        (*mutator).shadow_stack().walk(|object| {
-                            object.trace(self);
-                        });
-                    }
+                    (*mutator).shadow_stack().walk(|object| {
+                        object.trace(self);
+                    });
                 }
                 keep.trace(self);
 
                 while let Some(object) = self.mark_stack.pop() {
-                    unsafe {
-                        (*object).get_dyn().trace(self);
-                    }
+                    (*object).get_dyn().trace(self);
                 }
+                self.after_mark_constraints();
+                let rosalloc = self.rosalloc;
 
-                unsafe {
-                    let mut revoke_freed = 0;
-                    for i in 0..self.mutators.len() {
-                        let mutator = self.mutators[i];
-                        revoke_freed += (*(*self.rosalloc).rosalloc())
-                            .revoke_thread_local_runs(&mut (*mutator).tlab.runs);
+                let mark = &*(*rosalloc).get_mark_bitmap();
+                self.weak_refs.retain_mut(|object| {
+                    let header = object.base();
+                    if mark.test(header.cast()) {
+                        object.after_mark(|header| {
+                            if mark.test(header.cast()) {
+                                header
+                            } else {
+                                null_mut()
+                            }
+                        });
+                        true
+                    } else {
+                        false
                     }
-                    (*(*self.rosalloc).rosalloc()).revoke_thread_unsafe_current_runs();
-                    if VERBOSE_GC {
-                        eprintln!(
-                            "MarkSweep: freed {} by revoking runs",
-                            formatted_size(revoke_freed)
-                        );
-                    }
-                    let (freed, _) = (*self.rosalloc).sweep(false, |pointers, _| {
-                        (*self.rosalloc).sweep_callback(pointers, false)
-                    });
-                    /*let freed =
-                    crate::sweeper::rosalloc_parallel_sweep(&mut self.pool, self.rosalloc);*/
-                    if VERBOSE_GC {
-                        eprintln!(
-                            "MarkSweep: freed {} by sweeping RosAlloc space",
-                            formatted_size(freed)
-                        );
-                    }
+                });
 
-                    let los_freed = self.large_space.sweep();
-                    if VERBOSE_GC {
-                        eprintln!(
-                            "MarkSweep: freed {} by sweeping LOS",
-                            formatted_size(los_freed)
-                        );
-                    }
-                    let freed = freed + los_freed + revoke_freed;
-
-                    self.num_bytes_allocated.fetch_sub(freed, Ordering::Relaxed);
-                    (*self.rosalloc).swap_bitmaps();
-                    (*self.rosalloc).mark_bitmap.clear_all();
-
-                    (*(*self.rosalloc).rosalloc()).trim();
+                let mut revoke_freed = 0;
+                for i in 0..self.mutators.len() {
+                    let mutator = self.mutators[i];
+                    revoke_freed += (*(*self.rosalloc).rosalloc())
+                        .revoke_thread_local_runs(&mut (*mutator).tlab.runs);
                 }
+                (*(*self.rosalloc).rosalloc()).revoke_thread_unsafe_current_runs();
+
+                let (freed, _) = (*self.rosalloc).sweep(false, |pointers, _| {
+                    (*self.rosalloc).sweep_callback(pointers, false)
+                });
+                /*let freed =
+                crate::sweeper::rosalloc_parallel_sweep(&mut self.pool, self.rosalloc);*/
+
+                let los_freed = self.large_space.sweep();
+
+                let freed = freed + los_freed + revoke_freed;
+
+                self.num_bytes_allocated.fetch_sub(freed, Ordering::Relaxed);
+                (*self.rosalloc).swap_bitmaps();
+                (*self.rosalloc).mark_bitmap.clear_all();
+
+                (*(*self.rosalloc).rosalloc()).trim();
+
                 let target_size;
                 let bytes_allocated = self.num_bytes_allocated.load(Ordering::Relaxed);
                 let mut grow_bytes;
@@ -361,11 +372,10 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
                 self.large_space.prepare_for_allocation(false);
                 self.target_footprint.store(target_size, Ordering::Relaxed);
                 drop(safepoint);
-                unsafe {
-                    self.global_heap_lock.unlock();
-                    self.large_space_lock.unlock();
-                }
-            }
+
+                self.global_heap_lock.unlock();
+                self.large_space_lock.unlock();
+            },
             None => {
                 return;
             }
@@ -386,20 +396,12 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
                     unsafe {
                         (*self.live_bitmap).set(value.base.as_ptr().cast());
                     }
-                    if VERBOSE_ALLOC {
-                        eprintln!("MarkSweep: allocated {:p} from thread-local run", value);
-                    }
+
                     value
                 }
                 Err(value) => self.alloc_once::<T, false, true>(mutator, value),
             }
         } else {
-            if VERBOSE_ALLOC {
-                eprintln!(
-                    "MarkSweep: {} do not fit into thread-local run, allocating from global runs",
-                    formatted_size(size)
-                );
-            }
             self.alloc_once::<T, false, true>(mutator, value)
         }
     }
@@ -484,9 +486,7 @@ impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> GcBase
     }
 }
 
-impl<const VERBOSE_GC: bool, const VERBOSE_ALLOC: bool> Visitor
-    for MarkSweep<VERBOSE_GC, VERBOSE_ALLOC>
-{
+impl Visitor for MarkSweep {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>) {
         let object = root.as_ptr();
         unsafe {

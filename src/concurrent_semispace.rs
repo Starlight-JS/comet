@@ -176,6 +176,9 @@ impl TLAB<ConcSemispace> for ConcSemispaceTLAB {
 impl GcBase for ConcSemispace {
     const SUPPORTS_TLAB: bool = true;
     type TLAB = ConcSemispaceTLAB;
+    fn add_constraint<T: crate::gc_base::MarkingConstraint>(&mut self, _constraint: T) {
+        todo!()
+    }
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         _mutator: &mut MutatorRef<Self>,

@@ -1,3 +1,4 @@
+//! Mutator thread local information for GC
 use std::{
     cell::{Cell, UnsafeCell},
     mem::size_of,
@@ -34,6 +35,11 @@ impl ThreadState {
     }
 }
 
+/// Mutator thread instance. This type holds all necessary stuff for GC to work:
+/// - shadow stack for holding GC roots
+/// - TLAB for thread local allocations
+/// - heap itself when TLAB allocation fails
+/// - join data so other mutators can wait on this one
 pub struct Mutator<H: GcBase + 'static> {
     pub(crate) tlab: H::TLAB,
 
@@ -49,6 +55,11 @@ pub struct Mutator<H: GcBase + 'static> {
 }
 
 impl<H: 'static + GcBase> Mutator<H> {
+    /// Reset TLAB data.
+    ///
+    /// # Safety
+    ///
+    /// Must be used only by GC implementations when mutator is suspended.
     pub unsafe fn reset_tlab(&mut self) {
         self.tlab.reset();
     }
@@ -97,8 +108,8 @@ impl<H: 'static + GcBase> Mutator<H> {
             rc: 1,
         }
     }
-
-    pub fn shadow_stack(&self) -> &'static ShadowStack {
+    /// Get shadow stack reference for this thread.
+    pub fn shadow_stack<'a>(&self) -> &'a ShadowStack {
         unsafe { std::mem::transmute(&self.shadow_stack) }
     }
 
@@ -113,7 +124,9 @@ impl<H: 'static + GcBase> Mutator<H> {
         self.get_safepoint().wait_gc();
         self.state.store(state, Ordering::Release);
     }
-
+    /// Check if safepoint is requested. If it is requested mutator will wait for safepoint to be released.
+    ///
+    /// This function should be quite cheap because it is simple conditional check if safepoint is requested and call to slow path if it is requested.
     #[inline(always)]
     pub fn safepoint(&self) -> bool {
         unsafe {
@@ -144,7 +157,12 @@ impl<H: 'static + GcBase> Mutator<H> {
     pub(crate) fn state_save_and_set(&self, state: ThreadState) -> ThreadState {
         self.state_set(state, self.state.load(Ordering::Relaxed))
     }
-
+    /// Enters "unsafe" mutator state. In this state if safepoint is requested this mutator won't be stopped until it leaves unsafe state.
+    /// Typically mutators enter "unsafe" state for a few things:
+    /// - Waiting for a mutex lock
+    /// - Waiting for another mutator to finish by invoking `join()`
+    /// - FFI calls that do not use GC code
+    /// - They execute code that does not use GC methods or pointers
     pub fn enter_unsafe(&self) -> UnsafeMutatorState<H> {
         let state = self.state_save_and_set(ThreadState::Unsafe);
         UnsafeMutatorState {
@@ -152,7 +170,8 @@ impl<H: 'static + GcBase> Mutator<H> {
             gc_state: state,
         }
     }
-
+    /// Enter GC safe state. In this state if safepoint is requested mutator will wait for GC to finish. This method is usually invoked when you
+    /// need to perform some small GC safe operation inside GC unsafe scope.
     pub fn enter_safe(&self) -> UnsafeMutatorState<H> {
         let state = self.state_save_and_set(ThreadState::Safe);
         UnsafeMutatorState {
@@ -352,6 +371,8 @@ impl<H: 'static + GcBase> Drop for Mutator<H> {
     }
 }
 
+/// Reference counted [Mutator](Mutator) instance. When there is no references to this mutator
+/// mutator is detached from GC heap.
 pub struct MutatorRef<H: GcBase + 'static> {
     mutator: NonNull<Mutator<H>>,
 }

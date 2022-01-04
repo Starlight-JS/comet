@@ -219,7 +219,7 @@ impl RosAllocSpace {
     }
 }
 
-/// RosAlloc space thread local allocation buffer. Must not be used directly by mutator but should be used from [GcBase::allocate_inline]. This is due
+/// RosAlloc space thread local allocation buffer. Must not be used directly by mutator but should be used from [GcBase::alloc_inline]. This is due
 /// to possibility of refilling runs at allocation time.
 pub struct RosAllocTLAB {
     pub rosalloc: *mut RosAllocSpace,

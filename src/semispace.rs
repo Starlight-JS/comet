@@ -1,9 +1,21 @@
-use std::{cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc};
+//! # SemiSpace
+//!
+//! Simple semi-space garbage collector that separates heap into two spaces: "to space" and "from space". During mutator time
+//! all allocations go to "to space" and when it is full they are swapped and all objects are copied from "from space" to "to space".
+//! If there is no enough memory to copy object process will abort with OOM error.
+
+use std::{
+    cell::UnsafeCell,
+    marker::PhantomData,
+    mem::size_of,
+    ptr::{null_mut, NonNull},
+    sync::Arc,
+};
 
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak},
     bump_pointer_space::BumpPointerSpace,
-    gc_base::{AllocationSpace, GcBase},
+    gc_base::{AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns},
     large_space::{LargeObjectSpace, PreciseAllocation},
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
@@ -25,6 +37,7 @@ pub struct SemiSpace {
     pub(crate) safepoint: GlobalSafepoint,
     pub(crate) mark_stack: Vec<*mut HeapObjectHeader>,
     weak_refs: Vec<Weak<dyn Collectable>>,
+    constraints: Vec<Box<dyn MarkingConstraint>>,
 }
 
 pub fn instantiate_semispace(semispace_size: usize) -> MutatorRef<SemiSpace> {
@@ -35,7 +48,7 @@ pub fn instantiate_semispace(semispace_size: usize) -> MutatorRef<SemiSpace> {
         large_space: LargeObjectSpace::new(),
         mutators: Vec::new(),
         mark_stack: Vec::new(),
-
+        constraints: vec![],
         from_space: BumpPointerSpace::new(semispace_size),
         to_space: BumpPointerSpace::new(semispace_size),
         weak_refs: vec![],
@@ -58,6 +71,32 @@ pub fn instantiate_semispace(semispace_size: usize) -> MutatorRef<SemiSpace> {
 }
 
 impl SemiSpace {
+    unsafe fn after_mark_constraints(&mut self) {
+        let this = self as *mut Self;
+        (*this).constraints.retain_mut(|constraint| {
+            if constraint.is_over() {
+                false
+            } else {
+                if constraint.runs_at() == MarkingConstraintRuns::AfterMark {
+                    constraint.run(self);
+                }
+                true
+            }
+        });
+    }
+    unsafe fn before_mark_constraints(&mut self) {
+        let this = self as *mut Self;
+        (*this).constraints.retain_mut(|constraint| {
+            if constraint.is_over() {
+                false
+            } else {
+                if constraint.runs_at() == MarkingConstraintRuns::BeforeMark {
+                    constraint.run(self);
+                }
+                true
+            }
+        });
+    }
     fn trace(&mut self, root: &mut NonNull<HeapObjectHeader>) {
         unsafe {
             let object = root.as_ptr();
@@ -83,6 +122,11 @@ impl SemiSpace {
 impl GcBase for SemiSpace {
     const SUPPORTS_TLAB: bool = true;
     type TLAB = SimpleTLAB<Self>;
+    fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T) {
+        self.global_lock();
+        self.constraints.push(Box::new(constraint));
+        self.global_unlock();
+    }
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -204,6 +248,9 @@ impl GcBase for SemiSpace {
                 std::mem::swap(&mut self.from_space, &mut self.to_space);
                 //self.to_space.commit();
                 self.large_space.prepare_for_marking(false);
+                unsafe {
+                    self.before_mark_constraints();
+                }
                 for i in 0..self.mutators.len() {
                     unsafe {
                         let mutator = self.mutators[i];
@@ -223,7 +270,27 @@ impl GcBase for SemiSpace {
                         (*object).get_dyn().trace(self);
                     }
                 }
+                unsafe {
+                    self.after_mark_constraints();
+                }
+                self.weak_refs.retain_mut(|object| unsafe {
+                    let header = object.base();
+                    if (*header).is_forwarded() {
+                        let header = (*header).vtable() as *mut HeapObjectHeader;
+                        object.set_base(header);
+                        object.after_mark(|object| {
+                            if (*object).is_forwarded() {
+                                (*object).vtable() as _
+                            } else {
+                                null_mut()
+                            }
+                        });
 
+                        true
+                    } else {
+                        false
+                    }
+                });
                 self.large_space.sweep();
                 self.large_space.prepare_for_allocation(false);
                 self.from_space.reset();

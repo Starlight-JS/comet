@@ -1,3 +1,20 @@
+//! # MiniMark
+//! Generational garbage collector. It handles the objects in 2 generations:
+//!
+//! - young objects: allocated in the nursery if they are not too large, or in LOS otherwise.
+//! The nursery is fixed-size memory buffer of 4MB by default (or 1/2 of your L3 cache). When full,
+//! we do a minor collection; the surviving objects from the nursery are moved outside, and the
+//! non-surviving LOS objects are freed. All surviving objects become old.
+//!
+//! - old objects: never move again. These objects are either allocated by [rosalloc](https://github.com/playxe/rosalloc) (if they are small),
+//! or in LOS (if they are not small). Collected by regular mark-n-sweep during major collections.
+//!
+//! ## Large objects
+//!
+//! Large objects are allocated in [LargeObjectSpace](crate::large_space::LargeObjectSpace) and generational GC
+//! works with them too. If large object is in young space then it is not marked in minor cycle. To promote large object
+//! in minor GC cycle we just set its mark bit to 1. At start of each major collection mark bits of
+//! large objects are cleared and all unmarked large objects at the end of the cycle are dead.
 use crate::api::vtable_of;
 use crate::api::Collectable;
 use crate::api::Gc;
@@ -7,6 +24,8 @@ use crate::api::GC_GREY;
 use crate::api::GC_WHITE;
 use crate::gc_base::AllocationSpace;
 use crate::gc_base::GcBase;
+use crate::gc_base::MarkingConstraint;
+use crate::gc_base::MarkingConstraintRuns;
 use crate::gc_base::TLAB;
 use crate::large_space::LargeObjectSpace;
 use crate::mutator::*;
@@ -45,30 +64,23 @@ enum GcReason {
     OldSpaceFull,
 }
 
-/// Generational almost concurrent collector. This GC divides heap into two generations: nursery and old.
+/// Generational garbage collector. It handles the objects in 2 generations:
 ///
-/// To collect garbage it implements two GC cycle types:
-/// ## Minor
+/// - young objects: allocated in the nursery if they are not too large, or in LOS otherwise.
+/// The nursery is fixed-size memory buffer of 4MB by default (or 1/2 of your L3 cache). When full,
+/// we do a minor collection; the surviving objects from the nursery are moved outside, and the
+/// non-surviving LOS objects are freed. All surviving objects become old.
 ///
-/// Simple scavenging operation that copies surviving young object to old space. When minor cycle starts
-/// it waits for background concurrent sweeper task to finish in order to allocate objects in old space.
+/// - old objects: never move again. These objects are either allocated by [rosalloc](https://github.com/playxe/rosalloc) (if they are small),
+/// or in LOS (if they are not small). Collected by regular mark-n-sweep during major collections.
 ///
-/// ## Major
+/// ## Large objects
 ///
-/// Mark&Sweep garbage collection is performed on major cycle.
-///
-///
-/// # Spaces
-///
-/// ## Nursery
-///
-/// Bump pointer space that allows for TLAB blocks allocation. Not variable in size and always stays the same.
-///
-/// ## Old
-///
-/// Old space uses [rosalloc](https://github.com/playXE/rosalloc) for allocation.
-///
-pub struct GenCon {
+/// Large objects are allocated in [LargeObjectSpace](crate::large_space::LargeObjectSpace) and generational GC
+/// works with them too. If large object is in young space then it is not marked in minor cycle. To promote large object
+/// in minor GC cycle we just set its mark bit to 1. At start of each major collection mark bits of
+/// large objects are cleared and all unmarked large objects at the end of the cycle are dead.
+pub struct MiniMark {
     nursery: BumpPointerSpace,
     pub(crate) global_heap_lock: Lock,
     pub(crate) large_space_lock: Lock,
@@ -99,6 +111,7 @@ pub struct GenCon {
     mark_color: u8,
     growth_limit: usize,
     weak_refs: Vec<Weak<dyn Collectable>>,
+    constraints: Vec<Box<dyn MarkingConstraint>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,7 +122,7 @@ pub enum MajorPhase {
     Finalizing,
 }
 
-pub struct GenConOptions {
+pub struct MiniMarkOptions {
     pub verbose: bool,
     pub nursery_size: usize,
     pub initial_size: usize,
@@ -120,7 +133,7 @@ pub struct GenConOptions {
     pub growth_rate_max: f64,
 }
 
-impl Default for GenConOptions {
+impl Default for MiniMarkOptions {
     fn default() -> Self {
         Self {
             verbose: false,
@@ -135,8 +148,8 @@ impl Default for GenConOptions {
     }
 }
 
-pub fn instantiate_gencon(options: GenConOptions) -> MutatorRef<GenCon> {
-    let heap = Arc::new(UnsafeCell::new(GenCon::new(
+pub fn instantiate_minimark(options: MiniMarkOptions) -> MutatorRef<MiniMark> {
+    let heap = Arc::new(UnsafeCell::new(MiniMark::new(
         options.verbose,
         Some(options.nursery_size),
         options.initial_size,
@@ -161,7 +174,7 @@ pub fn instantiate_gencon(options: GenConOptions) -> MutatorRef<GenCon> {
     mutator
 }
 
-impl GenCon {
+impl MiniMark {
     fn new(
         verbose: bool,
         nursery_size: Option<usize>,
@@ -184,6 +197,7 @@ impl GenCon {
 
         let mut this = Self {
             growth_limit,
+            constraints: vec![],
             alloc_color: GC_WHITE,
             old_mark_stack: Vec::new(),
             mark_color: GC_BLACK,
@@ -349,6 +363,48 @@ impl GenCon {
                 || (*ptr).is_precise() && !(*PreciseAllocation::from_cell(ptr)).is_marked()
         }
     }
+    unsafe fn after_mark_constraints(&mut self, mutator: &mut MutatorRef<Self>, young: bool) {
+        let this = self as *mut Self;
+        (*this).constraints.retain_mut(|constraint| {
+            if constraint.is_over() {
+                false
+            } else {
+                if constraint.runs_at() == MarkingConstraintRuns::AfterMark {
+                    if young {
+                        constraint.run(&mut YoungVisitor {
+                            parent_object: null_mut(),
+                            minimark: self,
+                            mutator,
+                        });
+                    } else {
+                        constraint.run(&mut OldVisitor { minimark: self });
+                    }
+                }
+                true
+            }
+        });
+    }
+    unsafe fn before_mark_constraints(&mut self, mutator: &mut MutatorRef<Self>, young: bool) {
+        let this = self as *mut Self;
+        (*this).constraints.retain_mut(|constraint| {
+            if constraint.is_over() {
+                false
+            } else {
+                if constraint.runs_at() == MarkingConstraintRuns::BeforeMark {
+                    if young {
+                        constraint.run(&mut YoungVisitor {
+                            parent_object: null_mut(),
+                            minimark: self,
+                            mutator,
+                        });
+                    } else {
+                        constraint.run(&mut OldVisitor { minimark: self });
+                    }
+                }
+                true
+            }
+        });
+    }
     unsafe fn minor(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -365,9 +421,10 @@ impl GenCon {
         self.large_space.prepare_for_marking(true);
         self.large_space.begin_marking(false);
         let self_thread = mutator;
+        self.before_mark_constraints(self_thread, true);
         keep.iter_mut().for_each(|item| {
             item.trace(&mut YoungVisitor {
-                gencon: self,
+                minimark: self,
                 parent_object: null_mut(),
                 mutator: self_thread,
             });
@@ -380,7 +437,7 @@ impl GenCon {
             (*mutator).reset_tlab();
             (*mutator).shadow_stack().walk(|var| {
                 var.trace(&mut YoungVisitor {
-                    gencon: self,
+                    minimark: self,
                     parent_object: null_mut(),
                     mutator: self_thread,
                 });
@@ -392,7 +449,7 @@ impl GenCon {
 
         while let Some(object) = self.remembered_set.pop() {
             (*object).get_dyn().trace(&mut YoungVisitor {
-                gencon: self,
+                minimark: self,
                 parent_object: object,
                 mutator: self_thread,
             });
@@ -401,12 +458,13 @@ impl GenCon {
 
         while let Some(object) = self.mark_stack.pop() {
             (*object).get_dyn().trace(&mut YoungVisitor {
-                gencon: self,
+                minimark: self,
                 parent_object: object,
                 mutator: self_thread,
             });
             (*object).set_color(GC_GREY, GC_BLACK);
         }
+        self.after_mark_constraints(self_thread, true);
         let nursery_start = self.nursery.start();
         let nursery_end = self.nursery.end();
         let is_young = |ptr: *mut HeapObjectHeader| {
@@ -464,15 +522,20 @@ impl GenCon {
             > self.next_major_collection_threshold.load(Ordering::Acquire)
     }
 
-    unsafe fn major(&mut self, keep: &mut [&mut dyn Trace], reason: GcReason) {
+    unsafe fn major(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        keep: &mut [&mut dyn Trace],
+        reason: GcReason,
+    ) {
         let time = if self.verbose {
             Some(std::time::Instant::now())
         } else {
             None
         };
-
+        self.before_mark_constraints(mutator, false);
         keep.iter_mut().for_each(|item| {
-            item.trace(&mut OldVisitor { gencon: self });
+            item.trace(&mut OldVisitor { minimark: self });
         });
 
         for i in 0..self.mutators.len() {
@@ -480,18 +543,23 @@ impl GenCon {
             (*mutator).reset_tlab();
             (*mutator)
                 .shadow_stack()
-                .walk(|var| var.trace(&mut OldVisitor { gencon: self }));
+                .walk(|var| var.trace(&mut OldVisitor { minimark: self }));
         }
 
         while let Some(object) = self.remembered_set.pop() {
-            (*object).get_dyn().trace(&mut OldVisitor { gencon: self });
+            (*object)
+                .get_dyn()
+                .trace(&mut OldVisitor { minimark: self });
             (*object).unmark();
         }
 
         while let Some(object) = self.old_mark_stack.pop() {
-            (*object).get_dyn().trace(&mut OldVisitor { gencon: self });
+            (*object)
+                .get_dyn()
+                .trace(&mut OldVisitor { minimark: self });
             (*object).force_set_color(self.mark_color);
         }
+        self.after_mark_constraints(mutator, false);
         let color = self.mark_color;
         self.weak_refs.retain_mut(|object| {
             let header = object.base();
@@ -786,36 +854,41 @@ fn promotion_oom(size: usize, object: *const u8) -> ! {
 }
 
 pub struct YoungVisitor<'a> {
-    gencon: &'a mut GenCon,
+    minimark: &'a mut MiniMark,
     parent_object: *mut HeapObjectHeader,
-    mutator: &'a mut MutatorRef<GenCon>,
+    mutator: &'a mut MutatorRef<MiniMark>,
 }
 
 impl<'a> Visitor for YoungVisitor<'a> {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>) {
         unsafe {
-            self.gencon
+            self.minimark
                 .trace_drag_out(self.mutator, root, self.parent_object);
         }
     }
 }
 
 pub struct OldVisitor<'a> {
-    gencon: &'a mut GenCon,
+    minimark: &'a mut MiniMark,
 }
 
 impl<'a> Visitor for OldVisitor<'a> {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>) {
         unsafe {
-            self.gencon.trace(root);
+            self.minimark.trace(root);
         }
     }
 }
 
-impl GcBase for GenCon {
-    type TLAB = GenConTLAB;
+impl GcBase for MiniMark {
+    type TLAB = MiniMarkTLAB;
     const SUPPORTS_TLAB: bool = true;
     const LARGE_ALLOCATION_SIZE: usize = 16 * 1024;
+    fn add_constraint<T: crate::gc_base::MarkingConstraint + 'static>(&mut self, constraint: T) {
+        self.global_lock();
+        self.constraints.push(Box::new(constraint));
+        self.global_unlock();
+    }
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -829,6 +902,9 @@ impl GcBase for GenCon {
         }
         weak_ref
     }
+
+    /// Generational write barrier implementation. This is "always on" write barrier, this means that if `object` is from old space and not in
+    /// remembered set it will be put to remembered set in any case. This write barrier must be used right after write to an object happened.
     #[inline]
     fn write_barrier(&mut self, _: &mut MutatorRef<Self>, object: Gc<dyn crate::api::Collectable>) {
         unsafe {
@@ -847,7 +923,7 @@ impl GcBase for GenCon {
                 self.rem_set_lock.lock();
                 self.large_space_lock.lock();
                 if self.minor(mutator, keep, GcReason::AllocationFailure) {
-                    self.major(keep, GcReason::OldSpaceFull);
+                    self.major(mutator, keep, GcReason::OldSpaceFull);
                 }
                 drop(x);
                 self.global_heap_lock.unlock();
@@ -865,7 +941,7 @@ impl GcBase for GenCon {
                     self.rem_set_lock.lock();
                     self.large_space_lock.lock();
                     if self.minor(mutator, keep, GcReason::RequestedByUser) {
-                        self.major(keep, GcReason::OldSpaceFull);
+                        self.major(mutator, keep, GcReason::OldSpaceFull);
                     }
                     drop(safepoint);
                     self.global_heap_lock.unlock();
@@ -887,7 +963,7 @@ impl GcBase for GenCon {
                     self.rem_set_lock.lock();
                     self.large_space_lock.lock();
                     self.minor(mutator, keep, GcReason::RequestedByUser);
-                    self.major(keep, GcReason::RequestedByUser);
+                    self.major(mutator, keep, GcReason::RequestedByUser);
                     drop(safepoint);
                     self.global_heap_lock.unlock();
                     self.rem_set_lock.unlock();
@@ -1010,8 +1086,8 @@ impl GcBase for GenCon {
     }
 }
 
-pub struct GenConTLAB {
-    heap: Arc<UnsafeCell<GenCon>>,
+pub struct MiniMarkTLAB {
+    heap: Arc<UnsafeCell<MiniMark>>,
     tlab_start: *mut u8,
     tlab_cursor: *mut u8,
     tlab_end: *mut u8,
@@ -1019,7 +1095,7 @@ pub struct GenConTLAB {
     runs: [*mut Run; NUM_THREAD_LOCAL_SIZE_BRACKETS],
 }
 
-impl TLAB<GenCon> for GenConTLAB {
+impl TLAB<MiniMark> for MiniMarkTLAB {
     fn can_thread_local_allocate(&self, size: usize) -> bool {
         size <= 8 * 1024
     }
@@ -1059,7 +1135,7 @@ impl TLAB<GenCon> for GenConTLAB {
         }
     }
 
-    fn refill(&mut self, mutator: &MutatorRef<GenCon>, _size: usize) -> bool {
+    fn refill(&mut self, mutator: &MutatorRef<MiniMark>, _size: usize) -> bool {
         unsafe {
             let h = &mut *self.heap.get();
             let tlab = h.alloc_tlab_area(mutator, 32 * 1024);
@@ -1081,7 +1157,7 @@ impl TLAB<GenCon> for GenConTLAB {
             *run = dedicated_full_run();
         });
     }
-    fn create(heap: Arc<UnsafeCell<GenCon>>) -> Self {
+    fn create(heap: Arc<UnsafeCell<MiniMark>>) -> Self {
         Self {
             heap,
             tlab_start: null_mut(),
@@ -1092,7 +1168,7 @@ impl TLAB<GenCon> for GenConTLAB {
     }
 }
 
-impl TLABWithRuns for GenConTLAB {
+impl TLABWithRuns for MiniMarkTLAB {
     fn get_runs(&mut self) -> &mut [*mut Run; NUM_THREAD_LOCAL_SIZE_BRACKETS] {
         &mut self.runs
     }

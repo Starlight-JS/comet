@@ -1,3 +1,26 @@
+//! # Comet
+//!
+//! Comet is general purpose GC library for Rust. Main usage target for this library is for VM implementated in Rust programming language but nothing stops you from using it
+//! in regular Rust code.
+//!
+//! # Features
+//! - Multiple GC policies built-in
+//! - Support for multiple threads to allocate into GC heap
+//! - Support for multiple GC heaps in one process
+//! - Easy to use Rooting API without large runtime overhead like in rust-gc or others.
+//!
+//!
+//!
+//! ## GC Policies
+//!
+//! Comet includes a few GC policies implementations. Each GC policy has its own heap layout and allocation strategy.
+//! Here's the list of all GC policies with links to documentation for them:
+//! - [Immix](immix)
+//! - [MarkSweep](marksweep)
+//! - [MiniMark](minimark)
+//! - [Semispace](semispace)
+//! - [Shenandoah](shenandoah) (NOTE: Very W.I.P & TBD)
+
 #![feature(new_uninit, const_type_id, vec_retain_mut, thread_local)]
 #[macro_use]
 pub mod shadow_stack;
@@ -11,11 +34,11 @@ pub mod bump_pointer_space;
 pub mod card_table;
 pub mod concurrent_semispace;
 pub mod gc_base;
-pub mod generational;
 pub mod global;
 pub mod immix;
 pub mod large_space;
 pub mod marksweep;
+pub mod minimark;
 pub mod mutator;
 pub mod rosalloc_space;
 pub mod safepoint;

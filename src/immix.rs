@@ -1,6 +1,17 @@
+//! # Immix: A mark-region garbage collector
+//!
+//! The Immix collector is a collector based on mark-and-sweep with a
+//! modified thread-local allocation algorithm and a heap layout more optimised for
+//! modern CPU caches. The heap is organised into large blocks containing lines
+//! which then contain actual objects. The line size is chosen to more or less align
+//! with the cache line sizes of modern CPU architectures, such as x86 64. Objects
+//! are not collected unless all objects in a line are unreachable, and surprisingly this
+//! coarser granularity leads to performance improvements.
+//! You can find more information about Immix in this [paper](https://users.cecs.anu.edu.au/~steveb/pubs/papers/immix-pldi-2008.pdf)
+
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak, GC_BLACK, GC_WHITE},
-    gc_base::{AllocationSpace, GcBase},
+    gc_base::{AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns},
     large_space::{LargeObjectSpace, PreciseAllocation},
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
@@ -34,6 +45,9 @@ use block::*;
 use chunk::*;
 use space::*;
 
+/// Thread local allocator for Immix. This allocator stores two different bump pointers:
+/// 1) Large cursor for allocating objects that span multiple lines
+/// 2) Regular cursor for objects whose size is smaller than [IMMIX_LINE_SIZE](IMMIX_LINE_SIZE).
 pub struct ImmixAllocator {
     cursor: *mut u8,
     limit: *mut u8,
@@ -46,6 +60,7 @@ pub struct ImmixAllocator {
 }
 
 impl ImmixAllocator {
+    /// Try to acquire recyclable block. Returns false if there is no recyclable blocks or GC threshold is reached.
     pub fn acquire_recyclable_block(&mut self) -> bool {
         if self.is_out_of_memory_on_allocation(IMMIX_BLOCK_SIZE, self.emergency_collection) {
             return false;
@@ -53,7 +68,6 @@ impl ImmixAllocator {
 
         match self.space.get_reusable_block() {
             block if !block.is_null() => {
-                println!("reusable {:p}", block);
                 self.line = Some(unsafe { (*block).start().add(IMMIX_LINE_SIZE) });
                 unsafe {
                     self.space.num_bytes_allocated.fetch_add(
@@ -72,9 +86,12 @@ impl ImmixAllocator {
             _ => false,
         }
     }
+
+    /// Acquire recyclable lines from current block. Returns false if there is no more holes in block.
     pub fn acquire_recyclable_lines(&mut self) -> bool {
         while self.line.is_some() || self.acquire_recyclable_block() {
             let line = self.line.unwrap();
+
             let (start, end) = self.space.acquire_recyclable_lines(line);
             if !start.is_null() && !end.is_null() {
                 self.space
@@ -84,6 +101,7 @@ impl ImmixAllocator {
                 self.limit = end;
 
                 let block = ImmixBlock::align(start).cast::<ImmixBlock>();
+
                 self.line = if unsafe { end == (*block).end() } {
                     // Hole searching reached the end of a reusable block. Set the hole-searching cursor to None.
                     None
@@ -256,6 +274,7 @@ impl ImmixAllocator {
 }
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 
+/// Immix GC implementation. Read top level module documentation for more information
 pub struct Immix {
     space: &'static ImmixSpace,
     pub(crate) global_heap_lock: Lock,
@@ -269,9 +288,8 @@ pub struct Immix {
     pub(crate) mark_color: u8,
     total_gcs: usize,
     weak_refs: Vec<Weak<dyn Collectable>>,
+    constraints: Vec<Box<dyn MarkingConstraint>>,
 }
-
-impl Immix {}
 
 impl GetImmixSpace for Immix {
     fn immix_space(&self) -> &'static ImmixSpace {
@@ -307,6 +325,7 @@ pub fn instantiate_immix(
         mark_stack: Vec::new(),
         total_gcs: 0,
         weak_refs: vec![],
+        constraints: vec![],
     }));
     let href = unsafe { &mut *immix.get() };
     let join_data = JoinData::new();
@@ -324,6 +343,32 @@ pub fn instantiate_immix(
 }
 
 impl Immix {
+    unsafe fn after_mark_constraints(&mut self) {
+        let this = self as *mut Self;
+        (*this).constraints.retain_mut(|constraint| {
+            if constraint.is_over() {
+                false
+            } else {
+                if constraint.runs_at() == MarkingConstraintRuns::AfterMark {
+                    constraint.run(self);
+                }
+                true
+            }
+        });
+    }
+    unsafe fn before_mark_constraints(&mut self) {
+        let this = self as *mut Self;
+        (*this).constraints.retain_mut(|constraint| {
+            if constraint.is_over() {
+                false
+            } else {
+                if constraint.runs_at() == MarkingConstraintRuns::BeforeMark {
+                    constraint.run(self);
+                }
+                true
+            }
+        });
+    }
     #[cold]
     unsafe fn collect_and_alloc<T: Collectable + Sized + 'static>(
         &mut self,
@@ -344,6 +389,11 @@ impl GcBase for Immix {
     type TLAB = ImmixAllocator;
     const SUPPORTS_TLAB: bool = false;
     const LARGE_ALLOCATION_SIZE: usize = IMMIX_BLOCK_SIZE / 2;
+    fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T) {
+        self.global_lock();
+        self.constraints.push(Box::new(constraint));
+        self.global_unlock();
+    }
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -397,6 +447,7 @@ impl GcBase for Immix {
                 self.large_space_lock.lock();
 
                 self.space.prepare(true);
+                self.before_mark_constraints();
                 for object in keep {
                     object.trace(self);
                 }
@@ -410,6 +461,7 @@ impl GcBase for Immix {
                 while let Some(object) = self.mark_stack.pop() {
                     (*object).get_dyn().trace(self);
                 }
+                self.after_mark_constraints();
                 let prev =
                     self.space.num_bytes_allocated.load(Ordering::Relaxed) + self.large_space.bytes;
                 self.space.num_bytes_allocated.store(0, Ordering::Relaxed);
