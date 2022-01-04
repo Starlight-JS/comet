@@ -220,80 +220,6 @@ impl HeapObjectHeader {
     }
 }
 
-/// A type that should be used to store GCed struct fields. It is not movable but dereferencable.
-#[repr(transparent)]
-pub struct Field<T: Collectable + ?Sized> {
-    base: Gc<T>,
-}
-impl<T: Collectable + ?Sized> Field<T> {
-    pub fn as_dyn(&self) -> &dyn Collectable {
-        unsafe {
-            let base = self.base.base.as_ptr();
-            let trait_object = mopa::TraitObject {
-                data: (*base).data() as *mut (),
-                vtable: (*base).vtable() as *mut (),
-            };
-
-            std::mem::transmute(trait_object)
-        }
-    }
-    pub fn as_dyn_mut(&mut self) -> &mut dyn Collectable {
-        unsafe {
-            let base = self.base.base.as_ptr();
-            let trait_object = mopa::TraitObject {
-                data: (*base).data() as *mut (),
-                vtable: (*base).vtable() as *mut (),
-            };
-
-            std::mem::transmute(trait_object)
-        }
-    }
-
-    pub fn is<U: Collectable>(&self) -> bool {
-        self.base.is::<U>()
-    }
-
-    pub fn downcast<U: Collectable>(&self) -> Option<Gc<U>> {
-        self.base.downcast::<U>()
-    }
-
-    pub fn to_dyn(&self) -> Gc<dyn Collectable> {
-        self.base.to_dyn()
-    }
-
-    pub fn to_gc(&self) -> Gc<T> {
-        self.base
-    }
-}
-impl<T: Collectable + Sized> Deref for Field<T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target {
-        unsafe {
-            let base = self.base.base;
-            let data = (*base.as_ptr()).data().cast::<T>();
-            &*data
-        }
-    }
-}
-
-impl<T: Collectable + Sized> DerefMut for Field<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            let base = self.base.base;
-            let data = (*base.as_ptr()).data().cast::<T>() as *mut T;
-
-            &mut *data
-        }
-    }
-}
-
-unsafe impl<T: Collectable + ?Sized> Trace for Field<T> {
-    fn trace(&mut self, vis: &mut dyn Visitor) {
-        vis.mark_object(&mut self.base.base);
-    }
-}
-
-unsafe impl<T: Collectable + ?Sized> Finalize for Field<T> {}
 unsafe impl<T: Collectable + ?Sized> Finalize for Gc<T> {}
 impl<T: Collectable + ?Sized> Collectable for Gc<T> {}
 pub(crate) fn vtable_of<T: Collectable>() -> usize {
@@ -447,10 +373,7 @@ unsafe impl<T: Trace> Trace for Option<T> {
 }
 
 unsafe impl<T: Collectable> Finalize for Option<T> {}
-
 impl<T: Collectable> Collectable for Option<T> {}
-
-impl<T: Collectable> Collectable for Field<T> {}
 
 impl<T: Collectable> Deref for Gc<T> {
     type Target = T;
