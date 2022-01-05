@@ -12,6 +12,13 @@ pub struct Vector<T: Trace + 'static> {
 }
 
 impl<T: Trace + 'static> Vector<T> {
+    pub fn as_slice<'a>(&'a self) -> &'a [T] {
+        unsafe { std::slice::from_raw_parts(self.data(), self.len()) }
+    }
+
+    pub fn as_slice_mut<'a>(&'a mut self) -> &'a mut [T] {
+        unsafe { std::slice::from_raw_parts_mut(self.data(), self.len()) }
+    }
     pub fn new(mutator: &mut MutatorRef<impl GcBase>) -> Self {
         Self {
             storage: VectorStorage::create(mutator, 0),
@@ -76,7 +83,10 @@ impl<T: Trace + 'static> Vector<T> {
             core::ptr::drop_in_place(s);
         }
     }
-
+    /// `push` appends an element `value` to the end of the vector. `push` automatically reallocates
+    /// if the vector does not have sufficient capacity.
+    ///
+    /// **NOTE**: You must insert write barrier if vector holds GC data.
     pub fn push(&mut self, mutator: &mut MutatorRef<impl GcBase>, value: T) {
         let len = self.len();
         let cap = self.capacity();
@@ -185,6 +195,19 @@ impl<T: Trace + 'static> Vector<T> {
     pub fn at_mut(&mut self, index: usize) -> &mut T {
         unsafe { &mut *self.data().add(index) }
     }
+
+    pub fn reserve(&mut self, mutator: &mut MutatorRef<impl GcBase>, additional: usize) {
+        self.try_reserve(mutator, additional);
+    }
+
+    pub fn shrink_to_fit(&mut self, mutator: &mut MutatorRef<impl GcBase>) {
+        let len = self.len();
+        if len == self.capacity() {
+            return;
+        }
+
+        self.grow(mutator, len);
+    }
 }
 
 unsafe impl<T: Trace> Trace for Vector<T> {
@@ -270,3 +293,34 @@ macro_rules! gc_vector {
         vec.take().unwrap()
     }}
 }
+
+impl<T: std::fmt::Debug + Trace> std::fmt::Debug for Vector<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Vector[")?;
+        for i in 0..self.len() {
+            write!(f, "{:?}", self.at(i))?;
+            if i != self.len() - 1 {
+                write!(f, ",")?;
+            }
+        }
+
+        write!(f, "]")
+    }
+}
+
+impl<T: PartialEq + Trace> PartialEq for Vector<T> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+
+        for i in 0..self.len() {
+            if self.at(i) != other.at(i) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<T: Eq + Trace> Eq for Vector<T> {}
