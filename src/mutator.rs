@@ -63,6 +63,7 @@ impl<H: 'static + GcBase> Mutator<H> {
     pub unsafe fn reset_tlab(&mut self) {
         self.tlab.reset();
     }
+
     /// Spawn mutator thread attached to the heap.
     pub fn spawn_mutator<F>(&self, closure: F) -> JoinData
     where

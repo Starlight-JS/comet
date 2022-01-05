@@ -35,7 +35,7 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
     pub fn is_null(&self) -> bool {
         self.bitmap_begin.is_null()
     }
-    pub fn clear_all(&mut self) {
+    pub fn clear_all(&self) {
         self.mem_map
             .dontneed_and_zero(self.mem_map.start(), self.mem_map.size());
     }

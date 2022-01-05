@@ -1,5 +1,5 @@
 use super::*;
-use crate::utils::mmap::Mmap;
+use crate::{bitmap::SpaceBitmap, utils::mmap::Mmap};
 pub struct ImmixSpace {
     map: Mmap,
     pub free_blocks: BlockList,
@@ -12,6 +12,7 @@ pub struct ImmixSpace {
     pub min_heap_size: usize,
     pub max_heap_size: usize,
     pub growth_limit: usize,
+    pub mark_bitmap: SpaceBitmap<8>,
 }
 
 impl ImmixSpace {
@@ -67,8 +68,10 @@ impl ImmixSpace {
         if initial_size < min_heap_size {
             initial_size = min_heap_size;
         }
+        let bitmap = SpaceBitmap::empty();
         assert!(min_heap_size <= size as usize);
         Self {
+            mark_bitmap: bitmap,
             n_chunks,
             map: mmap,
             free_blocks: free_list,
@@ -82,7 +85,9 @@ impl ImmixSpace {
             growth_limit: size as _,
         }
     }
-
+    pub fn init_bitmap(&mut self) {
+        self.mark_bitmap = SpaceBitmap::create("mark-bitmap", self.map.start(), self.map.size());
+    }
     pub fn reserved_pages(&self) -> usize {
         self.free_blocks.len() * PAGE_SIZE
     }
