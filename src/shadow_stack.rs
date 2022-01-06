@@ -144,6 +144,7 @@ macro_rules! letroot {
     ($var_name: ident: $t: ty  = $stack: expr,$value: expr) => {
         let stack: &$crate::api::ShadowStack = &$stack;
         let value = $value;
+        #[allow(unused_unsafe)]
         let mut $var_name = unsafe {
             $crate::api::ShadowStackInternal::<$t>::construct(
                 stack,
@@ -155,7 +156,7 @@ macro_rules! letroot {
                 value,
             )
         };
-
+        #[allow(unused_unsafe)]
         stack
             .head
             .set(unsafe { core::mem::transmute(&mut $var_name) });
@@ -166,6 +167,7 @@ macro_rules! letroot {
     ($var_name : ident = $stack: expr,$value: expr) => {
         let stack: &$crate::shadow_stack::ShadowStack = &$stack;
         let value = $value;
+        #[allow(unused_unsafe)]
         let mut $var_name = unsafe {
             $crate::shadow_stack::ShadowStackInternal::<_>::construct(
                 stack,
@@ -177,11 +179,12 @@ macro_rules! letroot {
                 value,
             )
         };
-
+        #[allow(unused_unsafe)]
         stack
             .head
             .set(unsafe { core::mem::transmute(&mut $var_name) });
         #[allow(unused_mut)]
+        #[allow(unused_unsafe)]
         let mut $var_name =
             unsafe { $crate::shadow_stack::Rooted::construct(&mut $var_name.value) };
     };

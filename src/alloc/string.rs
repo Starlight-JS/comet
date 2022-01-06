@@ -44,27 +44,37 @@ use crate::{
 /// assert_eq!(vec![0, 159], value.unwrap_err().into_bytes());
 /// ```
 #[derive(Debug, PartialEq, Eq)]
-pub struct FromUtf8Error {
-    bytes: Vector<u8>,
+pub struct FromUtf8Error<H: GcBase> {
+    bytes: Vector<u8, H>,
     error: Utf8Error,
 }
 
 #[derive(Debug)]
 pub struct FromUtf16Error(());
 
-pub struct String {
-    vec: Vector<u8>,
+/// GCed version of [alloc::string::String] It has all the same features as std String.
+pub struct String<H: GcBase> {
+    vec: Vector<u8, H>,
 }
 
-impl String {
+impl<H: GcBase> String<H> {
+    /// Creates a new empty `String`.
     #[inline]
-    pub fn new(mutator: &mut MutatorRef<impl GcBase>) -> Self {
+    pub fn new(mutator: &mut MutatorRef<H>) -> Self {
         Self {
             vec: Vector::new(mutator),
         }
     }
+    /// Creates a new empty `String` with a particular capacity.
+    ///
+    /// `String`s have an internal buffer to hold their data. The capacity is
+    /// the length of that buffer, and can be queried with the [`capacity`]
+    /// method. This method creates an empty `String`, but one with an initial
+    /// buffer that can hold `capacity` bytes. This is useful when you may be
+    /// appending a bunch of data to the `String`, reducing the number of
+    /// reallocations it needs to do.
     #[inline]
-    pub fn with_capacity(mutator: &mut MutatorRef<impl GcBase>, capacity: usize) -> Self {
+    pub fn with_capacity(mutator: &mut MutatorRef<H>, capacity: usize) -> Self {
         Self {
             vec: Vector::with_capacity(mutator, capacity),
         }
@@ -121,7 +131,7 @@ impl String {
     /// See the docs for [`FromUtf8Error`] for more details on what you can do
     /// with this error.
     #[inline]
-    pub fn from_utf8(vec: Vector<u8>) -> Result<Self, FromUtf8Error> {
+    pub fn from_utf8(vec: Vector<u8, H>) -> Result<Self, FromUtf8Error<H>> {
         match std::str::from_utf8(vec.as_slice()) {
             Ok(..) => Ok(String { vec }),
             Err(e) => Err(FromUtf8Error {
@@ -131,10 +141,7 @@ impl String {
         }
     }
 
-    pub fn from_utf16(
-        mutator: &mut MutatorRef<impl GcBase>,
-        v: &[u16],
-    ) -> Result<String, FromUtf16Error> {
+    pub fn from_utf16(mutator: &mut MutatorRef<H>, v: &[u16]) -> Result<String<H>, FromUtf16Error> {
         let stack = mutator.shadow_stack();
         letroot!(ret = stack, Some(Self::with_capacity(mutator, v.len())));
 
@@ -149,12 +156,12 @@ impl String {
     }
 
     #[inline]
-    pub unsafe fn from_utf8_unchecked(bytes: Vector<u8>) -> Self {
+    pub unsafe fn from_utf8_unchecked(bytes: Vector<u8, H>) -> Self {
         Self { vec: bytes }
     }
 
     #[inline]
-    pub fn into_bytes(self) -> Vector<u8> {
+    pub fn into_bytes(self) -> Vector<u8, H> {
         self.vec
     }
 
@@ -169,7 +176,7 @@ impl String {
     }
 
     #[inline]
-    pub fn push_str(&mut self, mutator: &mut MutatorRef<impl GcBase>, string: &str) {
+    pub fn push_str(&mut self, mutator: &mut MutatorRef<H>, string: &str) {
         for byte in string.as_bytes() {
             self.vec.push(mutator, *byte);
         }
@@ -186,12 +193,12 @@ impl String {
     }
 
     #[inline]
-    pub fn reserve(&mut self, mutator: &mut MutatorRef<impl GcBase>, additional: usize) {
+    pub fn reserve(&mut self, mutator: &mut MutatorRef<H>, additional: usize) {
         self.vec.reserve(mutator, additional);
     }
 
     #[inline]
-    pub fn push(&mut self, mutator: &mut MutatorRef<impl GcBase>, ch: char) {
+    pub fn push(&mut self, mutator: &mut MutatorRef<H>, ch: char) {
         match ch.len_utf8() {
             1 => self.vec.push(mutator, ch as u8),
             _ => {
@@ -205,23 +212,23 @@ impl String {
     }
 }
 
-unsafe impl Trace for String {
+unsafe impl<H: GcBase> Trace for String<H> {
     fn trace(&mut self, vis: &mut dyn crate::api::Visitor) {
         self.vec.trace(vis);
     }
 }
 
-unsafe impl Finalize for String {}
-impl Collectable for String {}
+unsafe impl<H: GcBase> Finalize for String<H> {}
+impl<H: GcBase + 'static> Collectable for String<H> {}
 
-impl Deref for String {
+impl<H: GcBase> Deref for String<H> {
     type Target = str;
     fn deref(&self) -> &Self::Target {
         unsafe { std::str::from_utf8_unchecked(self.vec.as_slice()) }
     }
 }
 
-impl DerefMut for String {
+impl<H: GcBase> DerefMut for String<H> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { std::str::from_utf8_unchecked_mut(self.vec.as_slice_mut()) }
     }

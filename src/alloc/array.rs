@@ -1,11 +1,15 @@
-use std::mem::size_of;
+use std::{
+    mem::size_of,
+    ops::{Deref, DerefMut},
+};
 
 use crate::{
     api::{Collectable, Finalize, Gc, Trace},
     gc_base::{AllocationSpace, GcBase},
-    mutator::{Mutator, MutatorRef},
+    mutator::MutatorRef,
 };
 
+/// GC allocated fixed-size array. It is just like `Box<[T]>` but allocated on GC heap.
 #[repr(C, align(8))]
 pub struct Array<T: Trace + 'static> {
     pub(crate) length: u32,
@@ -14,10 +18,10 @@ pub struct Array<T: Trace + 'static> {
 }
 
 impl<T: Trace + 'static> Array<T> {
-    pub fn from_slice<const N: usize>(
-        mutator: &mut MutatorRef<impl GcBase>,
+    pub fn from_slice<H: GcBase, const N: usize>(
+        mutator: &mut MutatorRef<H>,
         slice: [T; N],
-    ) -> Gc<Self> {
+    ) -> Gc<Self, H> {
         let stack = mutator.shadow_stack();
         letroot!(init = stack, Some(slice));
         let mut this = mutator.allocate(
@@ -59,6 +63,27 @@ impl<T: Trace + 'static> Array<T> {
     pub fn at_mut(&mut self, index: usize) -> &mut T {
         unsafe { &mut *self.data_mut().add(index) }
     }
+
+    pub fn as_slice(&self) -> &[T] {
+        self
+    }
+
+    pub fn as_slice_mut(&mut self) -> &mut [T] {
+        self
+    }
+}
+
+impl<T: Trace> Deref for Array<T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.data(), self.len()) }
+    }
+}
+
+impl<T: Trace> DerefMut for Array<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { std::slice::from_raw_parts_mut(self.data_mut(), self.len()) }
+    }
 }
 
 impl<T: Trace + std::fmt::Debug> std::fmt::Debug for Array<T> {
@@ -95,8 +120,4 @@ impl<T: Trace> Collectable for Array<T> {
     fn allocation_size(&self) -> usize {
         self.length as usize * size_of::<T>() + size_of::<Self>()
     }
-}
-
-pub trait ArrayMake<T>: Collectable {
-    fn make(mutator: &Mutator<impl GcBase>, length: usize, init: T) -> Gc<Self>;
 }

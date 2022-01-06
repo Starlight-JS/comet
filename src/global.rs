@@ -49,7 +49,7 @@ pub fn global_initialize(
 pub unsafe fn allocate<T: Collectable + Sized + 'static>(
     value: T,
     space: AllocationSpace,
-) -> Gc<T> {
+) -> Gc<T, Immix> {
     let mut mutator = mutator();
 
     mutator.allocate(value, space)
@@ -61,7 +61,7 @@ pub unsafe fn allocate<T: Collectable + Sized + 'static>(
 ///
 /// Unsafe to call because it does not check for TLS state of mutator to be initialized.  
 ///
-pub unsafe fn allocate_weak<T: Collectable>(object: Gc<T>) -> Weak<T> {
+pub unsafe fn allocate_weak<T: Collectable>(object: Gc<T, Immix>) -> Weak<T, Immix> {
     let mut mutator = mutator();
     mutator.allocate_weak(object)
 }

@@ -1,4 +1,10 @@
-use std::{cell::UnsafeCell, mem::size_of, ptr::null_mut, sync::Arc};
+use std::{
+    cell::UnsafeCell,
+    marker::PhantomData,
+    mem::size_of,
+    ptr::{null_mut, NonNull},
+    sync::{atomic::AtomicUsize, Arc},
+};
 
 use crate::{
     alloc::array::Array,
@@ -17,12 +23,12 @@ pub enum AllocationSpace {
 }
 
 /// Base trait for all GCs.
-pub trait GcBase: Sized {
+pub trait GcBase: Sized + 'static {
     /// Default large object size. If allocation request exceeds this constant [GcBase::allocate_large] is invoked.
     const LARGE_ALLOCATION_SIZE: usize = 16 * 1024;
     /// Returns `true` if GC supports thread local allocation.
     const SUPPORTS_TLAB: bool = false;
-
+    type ReadBarrier: ReadBarrier<Self>;
     type TLAB: TLAB<Self>;
 
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T);
@@ -31,8 +37,8 @@ pub trait GcBase: Sized {
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         _mutator: &mut MutatorRef<Self>,
-        _value: Gc<T>,
-    ) -> Weak<T> {
+        _value: Gc<T, Self>,
+    ) -> Weak<T, Self> {
         panic!(
             "Weak references are not supported by `{}`",
             std::any::type_name::<Self>()
@@ -80,7 +86,7 @@ pub trait GcBase: Sized {
         mutator: &mut MutatorRef<Self>,
         value: T,
         space: AllocationSpace,
-    ) -> Gc<T>;
+    ) -> Gc<T, Self>;
 
     /// Post allocation operation e.g set mark in bitmap that this object was allocated.
     ///
@@ -89,7 +95,7 @@ pub trait GcBase: Sized {
     /// - Must not do CPU heavy operations
     /// - Must put `value` to finalizer list if `needs_drop::<T>()` returns true
     #[inline(always)]
-    fn post_alloc<T: Collectable + Sized + 'static>(&mut self, value: Gc<T>) {
+    fn post_alloc<T: Collectable + Sized + 'static>(&mut self, value: Gc<T, Self>) {
         let _ = value;
     }
     /// Allocates large object in GC heap.
@@ -97,7 +103,7 @@ pub trait GcBase: Sized {
         &mut self,
         mutator: &mut MutatorRef<Self>,
         value: T,
-    ) -> Gc<T>;
+    ) -> Gc<T, Self>;
 
     /// Perform minor GC cycle by stopping all threads and collecting unused memory.
     fn minor_collection(&mut self, mutator: &mut MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
@@ -111,7 +117,7 @@ pub trait GcBase: Sized {
     fn collect(&mut self, mutator: &mut MutatorRef<Self>, keep: &mut [&mut dyn Trace]);
 
     /// Write barrier implementation. No-op by default.
-    fn write_barrier(&mut self, mutator: &mut MutatorRef<Self>, object: Gc<dyn Collectable>) {
+    fn write_barrier(&mut self, mutator: &mut MutatorRef<Self>, object: Gc<dyn Collectable, Self>) {
         let _ = object;
         let _ = mutator;
     }
@@ -126,7 +132,7 @@ pub trait TLAB<H: GcBase<TLAB = Self>> {
     /// Can we allocate `size` bytes in thread local buffer?
     fn can_thread_local_allocate(&self, size: usize) -> bool;
     /// Allocate `value` in TLB or if there is no enough memory return `Err(value)`.
-    fn allocate<T: Collectable + 'static>(&mut self, value: T) -> Result<Gc<T>, T>;
+    fn allocate<T: Collectable + 'static>(&mut self, value: T) -> Result<Gc<T, H>, T>;
     /// Refill TLAB with new TLB. Returns `false` on failure.
     fn refill(&mut self, mutator: &MutatorRef<H>, alloc_size: usize) -> bool;
     /// Reset TLAB
@@ -179,4 +185,37 @@ pub unsafe trait MarkingConstraint {
     fn is_over(&self) -> bool;
     /// Executes this constraint.
     fn run(&mut self, visitor: &mut dyn Visitor);
+}
+
+pub trait ReadBarrier<H: GcBase>: Sized + 'static {
+    fn read_barrier<T: Collectable + ?Sized>(x: Gc<T, H>) -> Gc<T, H> {
+        x
+    }
+}
+
+pub struct NoReadBarrier;
+
+impl<H: GcBase> ReadBarrier<H> for NoReadBarrier {
+    #[inline(always)]
+    fn read_barrier<T: Collectable + ?Sized>(x: Gc<T, H>) -> Gc<T, H> {
+        x
+    }
+}
+
+/// Brooks pointer read barrier. In this read barrier we store forwarding pointer just behind
+/// object header and this forwarding pointer points to the same location or to new location, it
+/// is the cheapest read barrier out there.
+pub struct BrooksPointer;
+
+impl<H: GcBase> ReadBarrier<H> for BrooksPointer {
+    #[inline(always)]
+    fn read_barrier<T: Collectable + ?Sized>(x: Gc<T, H>) -> Gc<T, H> {
+        unsafe {
+            let base = x.base.as_ptr().cast::<AtomicUsize>().sub(1);
+            Gc {
+                base: NonNull::new_unchecked((*base).load(atomic::Ordering::Acquire) as _),
+                marker: PhantomData,
+            }
+        }
+    }
 }

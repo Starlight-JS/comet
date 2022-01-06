@@ -189,7 +189,7 @@ impl<H: 'static + GcBase> Mutator<H> {
 }
 
 impl<H: GcBase> MutatorRef<H> {
-    pub fn write_barrier(&mut self, object: Gc<dyn Collectable>) {
+    pub fn write_barrier(&mut self, object: Gc<dyn Collectable, H>) {
         let heap = unsafe { &mut *self.heap.get() };
         heap.write_barrier(self, object);
     }
@@ -210,11 +210,11 @@ impl<H: GcBase> MutatorRef<H> {
     pub unsafe fn allocate_from_tlab<T: Collectable + Sized + 'static>(
         &mut self,
         value: T,
-    ) -> Result<Gc<T>, T> {
+    ) -> Result<Gc<T, H>, T> {
         self.tlab.allocate(value)
     }
     #[inline]
-    pub fn allocate_weak<T: Collectable + ?Sized>(&mut self, value: Gc<T>) -> Weak<T> {
+    pub fn allocate_weak<T: Collectable + ?Sized>(&mut self, value: Gc<T, H>) -> Weak<T, H> {
         let href = unsafe { &mut *self.heap.get() };
         href.allocate_weak(self, value)
     }
@@ -224,7 +224,7 @@ impl<H: GcBase> MutatorRef<H> {
         &mut self,
         value: T,
         space: AllocationSpace,
-    ) -> Gc<T> {
+    ) -> Gc<T, H> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         if (!self.tlab.can_thread_local_allocate(size) && size >= H::LARGE_ALLOCATION_SIZE)
             || space == AllocationSpace::Large
@@ -254,7 +254,7 @@ impl<H: GcBase> MutatorRef<H> {
         mut value: T,
         size: usize,
         space: AllocationSpace,
-    ) -> Gc<T> {
+    ) -> Gc<T, H> {
         let heap = unsafe { &mut *self.heap.get() };
         if size >= H::LARGE_ALLOCATION_SIZE || space == AllocationSpace::Large {
             heap.allocate_large(self, value)
@@ -286,7 +286,7 @@ impl<H: GcBase> MutatorRef<H> {
         value: T,
         _size: usize,
         space: AllocationSpace,
-    ) -> Gc<T> {
+    ) -> Gc<T, H> {
         let href = unsafe { &mut *self.heap.get() };
         let val = href.alloc_inline(self, value, space);
         val

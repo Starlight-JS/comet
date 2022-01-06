@@ -26,6 +26,7 @@ use crate::gc_base::AllocationSpace;
 use crate::gc_base::GcBase;
 use crate::gc_base::MarkingConstraint;
 use crate::gc_base::MarkingConstraintRuns;
+use crate::gc_base::NoReadBarrier;
 use crate::gc_base::TLAB;
 use crate::large_space::LargeObjectSpace;
 use crate::mutator::*;
@@ -110,7 +111,7 @@ pub struct MiniMark {
     alloc_color: u8,
     mark_color: u8,
     growth_limit: usize,
-    weak_refs: Vec<Weak<dyn Collectable>>,
+    weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
 }
 
@@ -695,7 +696,7 @@ impl MiniMark {
         mutator: &mut MutatorRef<Self>,
         value: T,
         _space: AllocationSpace,
-    ) -> Gc<T> {
+    ) -> Gc<T, Self> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         if Rosalloc::is_size_for_thread_local(size) {
             let (idx, _bracket_size) = Rosalloc::size_to_index_and_bracket_size(size);
@@ -733,7 +734,7 @@ impl MiniMark {
         mutator: &mut MutatorRef<Self>,
         mut value: T,
         _space: AllocationSpace,
-    ) -> Gc<T> {
+    ) -> Gc<T, Self> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         let mut memory = self.nursery.bump_alloc(size);
         if memory.is_null() {
@@ -763,7 +764,7 @@ impl MiniMark {
         &mut self,
         mutator: &mut MutatorRef<Self>,
         mut value: T,
-    ) -> Gc<T> {
+    ) -> Gc<T, Self> {
         self.full_collection(mutator, &mut [&mut value]);
         self.alloc_once::<T, true, false>(mutator, value)
     }
@@ -774,7 +775,7 @@ impl MiniMark {
         &mut self,
         mut mutator: &mut MutatorRef<Self>,
         value: T,
-    ) -> Gc<T> {
+    ) -> Gc<T, Self> {
         fn max_bytes_bulk_allocated_for(size: usize) -> usize {
             if !Rosalloc::is_size_for_thread_local(size) {
                 return size;
@@ -896,6 +897,7 @@ impl<'a> Visitor for OldVisitor<'a> {
 impl GcBase for MiniMark {
     type TLAB = MiniMarkTLAB;
     const SUPPORTS_TLAB: bool = true;
+    type ReadBarrier = NoReadBarrier;
     const LARGE_ALLOCATION_SIZE: usize = 16 * 1024;
     fn add_constraint<T: crate::gc_base::MarkingConstraint + 'static>(&mut self, constraint: T) {
         self.global_lock();
@@ -905,9 +907,9 @@ impl GcBase for MiniMark {
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
-        value: Gc<T>,
-    ) -> Weak<T> {
-        let weak_ref = Weak::create(mutator, value);
+        value: Gc<T, Self>,
+    ) -> Weak<T, Self> {
+        let weak_ref = unsafe { Weak::create(mutator, value) };
         self.global_heap_lock.lock();
 
         self.weak_refs.push(weak_ref.to_dyn());
@@ -920,7 +922,11 @@ impl GcBase for MiniMark {
     /// Generational write barrier implementation. This is "always on" write barrier, this means that if `object` is from old space and not in
     /// remembered set it will be put to remembered set in any case. This write barrier must be used right after write to an object happened.
     #[inline]
-    fn write_barrier(&mut self, _: &mut MutatorRef<Self>, object: Gc<dyn crate::api::Collectable>) {
+    fn write_barrier(
+        &mut self,
+        _: &mut MutatorRef<Self>,
+        object: Gc<dyn crate::api::Collectable, Self>,
+    ) {
         unsafe {
             self.write_barrier_internal(object.base.as_ptr());
         }
@@ -1014,7 +1020,7 @@ impl GcBase for MiniMark {
         mutator: &mut MutatorRef<Self>,
         value: T,
         space: AllocationSpace,
-    ) -> crate::api::Gc<T> {
+    ) -> crate::api::Gc<T, Self> {
         match space {
             AllocationSpace::New => self.alloc_inline_new(mutator, value, space),
             AllocationSpace::Old => self.alloc_inline_old(mutator, value, space),
@@ -1022,7 +1028,7 @@ impl GcBase for MiniMark {
         }
     }
     #[inline(always)]
-    fn post_alloc<T: crate::api::Collectable + Sized + 'static>(&mut self, _value: Gc<T>) {
+    fn post_alloc<T: crate::api::Collectable + Sized + 'static>(&mut self, _value: Gc<T, Self>) {
         /*unsafe {
             let hdr = value.base.as_ptr();
             (*hdr).force_set_color(GC_WHITE);
@@ -1081,7 +1087,7 @@ impl GcBase for MiniMark {
         &mut self,
         _mutator: &mut MutatorRef<Self>,
         value: T,
-    ) -> crate::api::Gc<T> {
+    ) -> crate::api::Gc<T, Self> {
         unsafe {
             let size = value.allocation_size() + size_of::<HeapObjectHeader>();
             self.large_space_lock.lock();
@@ -1090,7 +1096,7 @@ impl GcBase for MiniMark {
             (*object).type_id = small_type_id::<T>();
             let gc = Gc {
                 base: NonNull::new_unchecked(object),
-                marker: PhantomData::<T>,
+                marker: PhantomData,
             };
             ((*object).data() as *mut T).write(value);
             self.large_space_lock.unlock();
@@ -1113,11 +1119,12 @@ impl TLAB<MiniMark> for MiniMarkTLAB {
     fn can_thread_local_allocate(&self, size: usize) -> bool {
         size <= 8 * 1024
     }
+
     #[inline]
     fn allocate<T: crate::api::Collectable + 'static>(
         &mut self,
         value: T,
-    ) -> Result<crate::api::Gc<T>, T> {
+    ) -> Result<crate::api::Gc<T, MiniMark>, T> {
         if self.tlab_cursor.is_null() {
             return Err(value);
         }
@@ -1243,7 +1250,7 @@ mod tests {
         let stack = minimark.shadow_stack();
         letroot!(
             x = stack,
-            Vector::<Gc<i32>>::with_capacity(&mut minimark, 4)
+            Vector::<Gc<i32, _>, _>::with_capacity(&mut minimark, 4)
         );
 
         minimark.minor_collection(&mut []);
@@ -1255,7 +1262,7 @@ mod tests {
 
         assert_eq!(**x.at(0), 42);
 
-        *x = Vector::<Gc<i32>>::new(&mut minimark);
+        *x = Vector::<Gc<i32, _>, _>::new(&mut minimark);
         minimark.full_collection(&mut []);
     }
 }

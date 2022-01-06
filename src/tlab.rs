@@ -32,7 +32,7 @@ impl<H: GcBase<TLAB = Self>> TLAB<H> for SimpleTLAB<H> {
     fn allocate<T: crate::api::Collectable + 'static>(
         &mut self,
         value: T,
-    ) -> Result<crate::api::Gc<T>, T> {
+    ) -> Result<crate::api::Gc<T, H>, T> {
         if self.tlab_cursor.is_null() {
             return Err(value);
         }

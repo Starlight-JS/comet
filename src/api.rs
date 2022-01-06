@@ -8,7 +8,11 @@ use std::{
 };
 
 use crate::{
-    gc_base::GcBase, large_space::PreciseAllocation, mutator::MutatorRef, small_type_id, utils::*,
+    gc_base::{GcBase, ReadBarrier},
+    large_space::PreciseAllocation,
+    mutator::MutatorRef,
+    small_type_id,
+    utils::*,
 };
 use atomic::Ordering;
 use mopa::mopafy;
@@ -220,8 +224,8 @@ impl HeapObjectHeader {
     }
 }
 
-unsafe impl<T: Collectable + ?Sized> Finalize for Gc<T> {}
-impl<T: Collectable + ?Sized> Collectable for Gc<T> {}
+unsafe impl<T: Collectable + ?Sized, H: GcBase> Finalize for Gc<T, H> {}
+impl<T: Collectable + ?Sized, H: GcBase> Collectable for Gc<T, H> {}
 pub(crate) fn vtable_of<T: Collectable>() -> usize {
     let x = null_mut::<T>();
     unsafe { std::mem::transmute::<_, mopa::TraitObject>(x as *mut dyn Collectable).vtable as _ }
@@ -241,22 +245,22 @@ pub(crate) fn vtable_of_trace<T: Trace>() -> usize {
 /// that this points to a garbage collected object with the correct header,
 /// and not some arbitrary bits that you've decided to heap allocate.
 ///
-pub struct Gc<T: Collectable + ?Sized> {
+pub struct Gc<T: Collectable + ?Sized, H: GcBase> {
     pub(crate) base: NonNull<HeapObjectHeader>,
-    pub(crate) marker: PhantomData<T>,
+    pub(crate) marker: PhantomData<(Box<T>, H)>,
 }
-impl<T: Collectable + Sized> Gc<MaybeUninit<T>> {
-    pub unsafe fn assume_init(self) -> Gc<T> {
+impl<T: Collectable + Sized, H: GcBase> Gc<MaybeUninit<T>, H> {
+    pub unsafe fn assume_init(self) -> Gc<T, H> {
         Gc {
             base: self.base,
             marker: Default::default(),
         }
     }
 }
-impl<T: Collectable + ?Sized> Gc<T> {
+impl<T: Collectable + ?Sized, H: GcBase> Gc<T, H> {
     /// Coerce this GC pointer to dyn Collectable.
     #[inline]
-    pub fn to_dyn(self) -> Gc<dyn Collectable> {
+    pub fn to_dyn(self) -> Gc<dyn Collectable, H> {
         Gc {
             base: self.base,
             marker: PhantomData,
@@ -274,7 +278,7 @@ impl<T: Collectable + ?Sized> Gc<T> {
     }
     /// Try to downcast this reference to `U`
     #[inline]
-    pub fn downcast<U: Collectable>(&self) -> Option<Gc<U>> {
+    pub fn downcast<U: Collectable>(&self) -> Option<Gc<U, H>> {
         if self.is::<U>() {
             Some(Gc {
                 base: self.base,
@@ -290,7 +294,7 @@ impl<T: Collectable + ?Sized> Gc<T> {
     /// # Safety
     /// Unsafe to call because does not check for type
     #[inline]
-    pub unsafe fn downcast_unchecked<U: Collectable>(&self) -> Gc<U> {
+    pub unsafe fn downcast_unchecked<U: Collectable>(&self) -> Gc<U, H> {
         self.downcast().unwrap_or_else(|| unreachable_unchecked())
     }
     /// Returns number of bytes that this GC pointer uses on the heap.
@@ -306,12 +310,12 @@ impl<T: Collectable + ?Sized> Gc<T> {
     }
 }
 
-impl<T: Collectable + ?Sized> Clone for Gc<T> {
+impl<T: Collectable + ?Sized, H: GcBase> Clone for Gc<T, H> {
     fn clone(&self) -> Self {
-        *self
+        H::ReadBarrier::read_barrier(*self)
     }
 }
-impl<T: Collectable + ?Sized> Copy for Gc<T> {}
+impl<T: Collectable + ?Sized, H: GcBase> Copy for Gc<T, H> {}
 
 macro_rules! impl_prim {
     ($($t: ty)*) => {
@@ -335,7 +339,7 @@ impl_prim!(
 unsafe impl Trace for () {}
 unsafe impl Finalize for () {}
 impl Collectable for () {}
-unsafe impl<T: Collectable + ?Sized> Trace for Gc<T> {
+unsafe impl<T: Collectable + ?Sized, H: GcBase> Trace for Gc<T, H> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         vis.mark_object(&mut self.base);
     }
@@ -350,7 +354,7 @@ pub trait Visitor {
     }
 }
 
-impl<T: Collectable + ?Sized> std::fmt::Pointer for Gc<T> {
+impl<T: Collectable + ?Sized, H: GcBase> std::fmt::Pointer for Gc<T, H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:p}", self.base)
     }
@@ -375,20 +379,22 @@ unsafe impl<T: Trace> Trace for Option<T> {
 unsafe impl<T: Collectable> Finalize for Option<T> {}
 impl<T: Collectable> Collectable for Option<T> {}
 
-impl<T: Collectable> Deref for Gc<T> {
+impl<T: Collectable, H: GcBase> Deref for Gc<T, H> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe {
-            let base = self.base.as_ptr();
+            let this: Gc<T, H> = H::ReadBarrier::read_barrier::<T>(*self);
+            let base = this.base.as_ptr();
             &*(*base).data().cast::<T>()
         }
     }
 }
 
-impl<T: Collectable> DerefMut for Gc<T> {
+impl<T: Collectable, H: GcBase> DerefMut for Gc<T, H> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
-            let base = self.base.as_ptr();
+            let this: Gc<T, H> = H::ReadBarrier::read_barrier::<T>(*self);
+            let base = this.base.as_ptr();
             &mut *((*base).data().cast::<T>() as *mut T)
         }
     }
@@ -457,8 +463,16 @@ unsafe impl<T: Trace, const N: usize> Trace for [T; N] {
     }
 }
 
-pub struct WeakInner {
-    pub value: Option<Gc<dyn Collectable>>,
+unsafe impl<T: Trace> Trace for &mut [T] {
+    fn trace(&mut self, vis: &mut dyn Visitor) {
+        for x in self.iter_mut() {
+            x.trace(vis);
+        }
+    }
+}
+
+pub struct WeakInner<H: GcBase> {
+    pub value: Option<Gc<dyn Collectable, H>>,
 }
 /// Weak reference objects, which do not prevent their referents from being made finalizable, finalized, and then reclaimed. Weak references are most often used to implement canonicalizing mappings.
 ///
@@ -468,25 +482,25 @@ pub struct WeakInner {
 /// that object is reachable through a chain of strong and soft references.
 /// At the same time it will declare all of the formerly weakly-reachable objects to be finalizable.
 /// At the same time or at some later time it will enqueue those newly-cleared weak references that are registered with reference queues.
-pub struct Weak<T: Collectable + ?Sized> {
-    value: Gc<WeakInner>,
+pub struct Weak<T: Collectable + ?Sized, H: GcBase> {
+    value: Gc<WeakInner<H>, H>,
     marker: PhantomData<T>,
 }
 
-unsafe impl Trace for WeakInner {}
-unsafe impl Finalize for WeakInner {
+unsafe impl<H: GcBase> Trace for WeakInner<H> {}
+unsafe impl<H: GcBase> Finalize for WeakInner<H> {
     unsafe fn finalize(&mut self) {}
 }
 
-impl Collectable for WeakInner {}
+impl<H: GcBase> Collectable for WeakInner<H> {}
 
-unsafe impl<T: Collectable + ?Sized> Trace for Weak<T> {
+unsafe impl<T: Collectable + ?Sized, H: GcBase> Trace for Weak<T, H> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         vis.mark_weak(&mut self.value.base);
     }
 }
 
-impl<T: Collectable + ?Sized> Weak<T> {
+impl<T: Collectable + ?Sized, H: GcBase> Weak<T, H> {
     pub unsafe fn base(self) -> *mut HeapObjectHeader {
         self.value.base.as_ptr()
     }
@@ -494,7 +508,7 @@ impl<T: Collectable + ?Sized> Weak<T> {
         self.value.base = NonNull::new_unchecked(hdr);
     }
     /// Creates a new weak reference that refers to the given object.
-    pub fn create(mutator: &mut MutatorRef<impl GcBase>, value: Gc<T>) -> Self {
+    pub unsafe fn create(mutator: &mut MutatorRef<H>, value: Gc<T, H>) -> Self {
         let stack = mutator.shadow_stack();
         letroot!(value = stack, value);
         let mut inner = mutator.allocate(
@@ -516,7 +530,7 @@ impl<T: Collectable + ?Sized> Weak<T> {
         self.value.value = None;
     }
     /// Returns this weak reference object's referent. If this reference object has been cleared, either by the program or by the garbage collector, then this method returns `None`.
-    pub fn upgrade(self) -> Option<Gc<T>>
+    pub fn upgrade(self) -> Option<Gc<T, H>>
     where
         T: Sized,
     {
@@ -547,18 +561,26 @@ impl<T: Collectable + ?Sized> Weak<T> {
         }
     }
 
-    pub fn to_dyn(self) -> Weak<dyn Collectable> {
+    pub fn to_dyn(self) -> Weak<dyn Collectable, H> {
         Weak {
-            value: self.value,
+            value: H::ReadBarrier::read_barrier(self.value),
             marker: PhantomData,
         }
     }
 }
 
-impl<T: Collectable + ?Sized> Clone for Weak<T> {
+impl<T: Collectable + ?Sized, H: GcBase> Clone for Weak<T, H> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: Collectable + ?Sized> Copy for Weak<T> {}
+impl<T: Collectable + ?Sized, H: GcBase> Copy for Weak<T, H> {}
+
+impl<T: PartialEq + Collectable, H: GcBase> PartialEq for Gc<T, H> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<T: Eq + Collectable, H: GcBase> Eq for Gc<T, H> {}

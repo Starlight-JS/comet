@@ -15,7 +15,7 @@ use std::{
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak},
     bump_pointer_space::BumpPointerSpace,
-    gc_base::{AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns},
+    gc_base::{AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoReadBarrier},
     large_space::{LargeObjectSpace, PreciseAllocation},
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
@@ -36,7 +36,7 @@ pub struct SemiSpace {
     pub(crate) mutators: Vec<*mut Mutator<Self>>,
     pub(crate) safepoint: GlobalSafepoint,
     pub(crate) mark_stack: Vec<*mut HeapObjectHeader>,
-    weak_refs: Vec<Weak<dyn Collectable>>,
+    weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
 }
 
@@ -122,6 +122,7 @@ impl SemiSpace {
 impl GcBase for SemiSpace {
     const SUPPORTS_TLAB: bool = true;
     type TLAB = SimpleTLAB<Self>;
+    type ReadBarrier = NoReadBarrier;
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T) {
         self.global_lock();
         self.constraints.push(Box::new(constraint));
@@ -130,9 +131,9 @@ impl GcBase for SemiSpace {
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
-        value: Gc<T>,
-    ) -> Weak<T> {
-        let weak_ref = Weak::create(mutator, value);
+        value: Gc<T, Self>,
+    ) -> Weak<T, Self> {
+        let weak_ref = unsafe { Weak::create(mutator, value) };
         self.global_heap_lock.lock();
         self.weak_refs.push(weak_ref.to_dyn());
         unsafe {
@@ -149,7 +150,7 @@ impl GcBase for SemiSpace {
         mutator: &mut MutatorRef<Self>,
         mut value: T,
         _: AllocationSpace,
-    ) -> crate::api::Gc<T> {
+    ) -> crate::api::Gc<T, Self> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         let mut memory = self.to_space.bump_alloc(size);
         if memory.is_null() {
@@ -222,7 +223,7 @@ impl GcBase for SemiSpace {
         &mut self,
         _mutator: &mut MutatorRef<Self>,
         value: T,
-    ) -> crate::api::Gc<T> {
+    ) -> crate::api::Gc<T, Self> {
         unsafe {
             let size = value.allocation_size() + size_of::<HeapObjectHeader>();
             self.large_space_lock.lock();
@@ -231,7 +232,7 @@ impl GcBase for SemiSpace {
             (*object).type_id = small_type_id::<T>();
             let gc = Gc {
                 base: NonNull::new_unchecked(object),
-                marker: PhantomData::<T>,
+                marker: PhantomData,
             };
             ((*object).data() as *mut T).write(value);
             self.large_space_lock.unlock();

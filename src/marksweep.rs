@@ -1,6 +1,6 @@
 use crate::api::Weak;
 use crate::bitmap::SpaceBitmap;
-use crate::gc_base::{AllocationSpace, MarkingConstraint, MarkingConstraintRuns};
+use crate::gc_base::{AllocationSpace, MarkingConstraint, MarkingConstraintRuns, NoReadBarrier};
 use crate::rosalloc_space::{RosAllocSpace, RosAllocTLAB};
 use crate::utils::formatted_size;
 use crate::{
@@ -38,7 +38,7 @@ pub struct MarkSweep {
     pool: scoped_threadpool::Pool,
     verbose: bool,
     total_gcs: usize,
-    weak_refs: Vec<Weak<dyn Collectable>>,
+    weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
 }
 fn max_bytes_bulk_allocated_for(size: usize) -> usize {
@@ -201,7 +201,7 @@ impl MarkSweep {
         &mut self,
         mutator: &mut MutatorRef<Self>,
         mut value: T,
-    ) -> Gc<T> {
+    ) -> Gc<T, Self> {
         self.collect(mutator, &mut [&mut value]);
         self.alloc_once::<T, true, false>(mutator, value)
     }
@@ -210,7 +210,7 @@ impl MarkSweep {
         &mut self,
         mut mutator: &mut MutatorRef<Self>,
         value: T,
-    ) -> Gc<T> {
+    ) -> Gc<T, Self> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         let max_bytes_tl_bulk_allocated = max_bytes_bulk_allocated_for(size);
         if self.is_out_of_memory_on_allocation(max_bytes_tl_bulk_allocated, GROW) {
@@ -258,7 +258,7 @@ impl MarkSweep {
 impl GcBase for MarkSweep {
     type TLAB = RosAllocTLAB;
     const SUPPORTS_TLAB: bool = false;
-
+    type ReadBarrier = NoReadBarrier;
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T) {
         self.global_lock();
         self.constraints.push(Box::new(constraint));
@@ -268,9 +268,9 @@ impl GcBase for MarkSweep {
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
-        value: Gc<T>,
-    ) -> Weak<T> {
-        let weak_ref = Weak::create(mutator, value);
+        value: Gc<T, Self>,
+    ) -> Weak<T, Self> {
+        let weak_ref = unsafe { Weak::create(mutator, value) };
         self.global_heap_lock.lock();
         self.weak_refs.push(weak_ref.to_dyn());
         unsafe {
@@ -387,7 +387,7 @@ impl GcBase for MarkSweep {
         mutator: &mut MutatorRef<Self>,
         value: T,
         _space: AllocationSpace,
-    ) -> Gc<T> {
+    ) -> Gc<T, Self> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         if Rosalloc::is_size_for_thread_local(size) {
             let obj = unsafe { mutator.allocate_from_tlab(value) };
@@ -460,7 +460,7 @@ impl GcBase for MarkSweep {
         &mut self,
         _mutator: &mut MutatorRef<Self>,
         value: T,
-    ) -> crate::api::Gc<T> {
+    ) -> crate::api::Gc<T, Self> {
         unsafe {
             let size = value.allocation_size() + size_of::<HeapObjectHeader>();
             self.large_space_lock.lock();
@@ -469,7 +469,7 @@ impl GcBase for MarkSweep {
             (*object).type_id = small_type_id::<T>();
             let gc = Gc {
                 base: NonNull::new_unchecked(object),
-                marker: PhantomData::<T>,
+                marker: PhantomData,
             };
             ((*object).data() as *mut T).write(value);
             self.num_bytes_allocated.fetch_add(

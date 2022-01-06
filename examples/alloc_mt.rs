@@ -1,16 +1,16 @@
 use comet_multi::{
     api::{Collectable, Finalize, Gc, Trace},
-    gc_base::AllocationSpace,
+    gc_base::{AllocationSpace, GcBase},
     letroot,
     minimark::{instantiate_minimark, MiniMarkOptions},
 };
 
-pub enum Node {
+pub enum Node<H: GcBase> {
     None,
-    Some { value: i64, next: Gc<Node> },
+    Some { value: i64, next: Gc<Node<H>, H> },
 }
 
-unsafe impl Trace for Node {
+unsafe impl<H: GcBase> Trace for Node<H> {
     fn trace(&mut self, vis: &mut dyn comet_multi::api::Visitor) {
         match self {
             Self::Some { next, .. } => {
@@ -21,8 +21,8 @@ unsafe impl Trace for Node {
     }
 }
 
-unsafe impl Finalize for Node {}
-impl Collectable for Node {}
+unsafe impl<H: GcBase> Finalize for Node<H> {}
+impl<H: GcBase> Collectable for Node<H> {}
 
 fn main() {
     let mut opts = MiniMarkOptions::default();

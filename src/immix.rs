@@ -11,7 +11,7 @@
 
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak, GC_BLACK, GC_WHITE},
-    gc_base::{AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns},
+    gc_base::{AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoReadBarrier},
     large_space::{LargeObjectSpace, PreciseAllocation},
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
@@ -160,7 +160,7 @@ where
     fn allocate<T: crate::api::Collectable + 'static>(
         &mut self,
         _value: T,
-    ) -> Result<crate::api::Gc<T>, T> {
+    ) -> Result<crate::api::Gc<T, H>, T> {
         unreachable!()
     }
     fn reset(&mut self) {
@@ -287,7 +287,7 @@ pub struct Immix {
     pub(crate) alloc_color: u8,
     pub(crate) mark_color: u8,
     total_gcs: usize,
-    weak_refs: Vec<Weak<dyn Collectable>>,
+    weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
 }
 
@@ -375,7 +375,7 @@ impl Immix {
         mutator: &mut MutatorRef<Self>,
 
         mut value: T,
-    ) -> Gc<T> {
+    ) -> Gc<T, Self> {
         self.collect_alloc_failure(mutator, &mut [&mut value]);
 
         mutator.tlab.emergency_collection = true;
@@ -388,6 +388,7 @@ impl Immix {
 impl GcBase for Immix {
     type TLAB = ImmixAllocator;
     const SUPPORTS_TLAB: bool = false;
+    type ReadBarrier = NoReadBarrier;
     const LARGE_ALLOCATION_SIZE: usize = IMMIX_BLOCK_SIZE / 2;
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T) {
         self.global_lock();
@@ -397,9 +398,9 @@ impl GcBase for Immix {
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
-        value: Gc<T>,
-    ) -> Weak<T> {
-        let weak_ref = Weak::create(mutator, value);
+        value: Gc<T, Self>,
+    ) -> Weak<T, Self> {
+        let weak_ref = unsafe { Weak::<T, Self>::create(mutator, value) };
         self.global_heap_lock.lock();
         self.weak_refs.push(weak_ref.to_dyn());
         unsafe {
@@ -412,7 +413,7 @@ impl GcBase for Immix {
         mutator: &mut MutatorRef<Self>,
         value: T,
         _space: AllocationSpace,
-    ) -> Gc<T> {
+    ) -> Gc<T, Self> {
         let alloc = &mut mutator.tlab;
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
         unsafe {
@@ -572,7 +573,7 @@ impl GcBase for Immix {
         &mut self,
         _mutator: &mut MutatorRef<Self>,
         value: T,
-    ) -> crate::api::Gc<T> {
+    ) -> crate::api::Gc<T, Self> {
         unsafe {
             let size = value.allocation_size() + size_of::<HeapObjectHeader>();
             self.large_space_lock.lock();
@@ -581,7 +582,7 @@ impl GcBase for Immix {
             (*object).type_id = small_type_id::<T>();
             let gc = Gc {
                 base: NonNull::new_unchecked(object),
-                marker: PhantomData::<T>,
+                marker: PhantomData,
             };
             ((*object).data() as *mut T).write(value);
             self.large_space_lock.unlock();
@@ -590,7 +591,7 @@ impl GcBase for Immix {
         }
     }
     #[inline(always)]
-    fn post_alloc<T: Collectable + Sized + 'static>(&mut self, value: Gc<T>) {
+    fn post_alloc<T: Collectable + Sized + 'static>(&mut self, value: Gc<T, Self>) {
         unsafe {
             let base = value.base.as_ptr();
             (*base).force_set_color(self.alloc_color);

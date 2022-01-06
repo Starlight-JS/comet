@@ -1,16 +1,16 @@
 use comet_multi::{
     alloc::vector::Vector,
     api::{Collectable, Finalize, Gc, Trace},
-    gc_base::AllocationSpace,
-    immix, letroot,
+    gc_base::{AllocationSpace, GcBase},
+    letroot,
     minimark::{instantiate_minimark, MiniMarkOptions},
 };
-pub enum Node {
+pub enum Node<H: GcBase> {
     None,
-    Some { value: i64, next: Gc<Node> },
+    Some { value: i64, next: Gc<Node<H>, H> },
 }
 
-unsafe impl Trace for Node {
+unsafe impl<H: GcBase> Trace for Node<H> {
     fn trace(&mut self, vis: &mut dyn comet_multi::api::Visitor) {
         match self {
             Self::Some { next, .. } => {
@@ -21,8 +21,8 @@ unsafe impl Trace for Node {
     }
 }
 
-unsafe impl Finalize for Node {}
-impl Collectable for Node {}
+unsafe impl<H: GcBase> Finalize for Node<H> {}
+impl<H: GcBase> Collectable for Node<H> {}
 fn main() {
     let mut options = MiniMarkOptions::default();
     options.nursery_size = 1 * 1024 * 1024;
@@ -31,7 +31,7 @@ fn main() {
     let stack = minimark.shadow_stack();
     letroot!(
         x = stack,
-        Vector::<Gc<i32>>::with_capacity(&mut minimark, 4)
+        Vector::<Gc<i32, _>, _>::with_capacity(&mut minimark, 4)
     );
 
     minimark.minor_collection(&mut []);
@@ -43,6 +43,6 @@ fn main() {
 
     assert_eq!(**x.at(0), 42);
 
-    *x = Vector::<Gc<i32>>::new(&mut minimark);
+    *x = Vector::<Gc<i32, _>, _>::new(&mut minimark);
     minimark.full_collection(&mut []);
 }

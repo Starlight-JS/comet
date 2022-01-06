@@ -253,7 +253,7 @@ impl<H: GcBase<TLAB = Self>> TLAB<H> for RosAllocTLAB {
     fn allocate<T: crate::api::Collectable + 'static>(
         &mut self,
         value: T,
-    ) -> Result<crate::api::Gc<T>, T> {
+    ) -> Result<crate::api::Gc<T, H>, T> {
         unsafe {
             let size = align_usize(value.allocation_size(), 8);
             //let rosalloc = &mut *((*self.rosalloc).rosalloc);
