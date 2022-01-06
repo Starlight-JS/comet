@@ -1,6 +1,7 @@
 use std::{
     char::decode_utf16,
-    ops::{Deref, DerefMut},
+    hash::Hash,
+    ops::{Deref, DerefMut, RangeBounds},
     str::Utf8Error,
 };
 
@@ -210,6 +211,109 @@ impl<H: GcBase> String<H> {
             }
         }
     }
+    #[inline]
+    pub fn remove(&mut self, idx: usize) -> char {
+        let ch = match self[idx..].chars().next() {
+            Some(ch) => ch,
+            None => panic!("cannot remove a char from the end of a string"),
+        };
+
+        let next = idx + ch.len_utf8();
+        let len = self.len();
+        unsafe {
+            std::ptr::copy(
+                self.vec.as_ptr().add(next),
+                self.vec.as_mut_ptr().add(idx),
+                len - next,
+            );
+            self.vec.set_len(len - (next - idx));
+        }
+        ch
+    }
+    #[inline]
+    pub fn insert(&mut self, mutator: &mut MutatorRef<H>, idx: usize, ch: char) {
+        assert!(self.is_char_boundary(idx));
+        let mut bits = [0; 4];
+        let bits = ch.encode_utf8(&mut bits).as_bytes();
+
+        unsafe {
+            self.insert_bytes(mutator, idx, bits);
+        }
+    }
+
+    unsafe fn insert_bytes(&mut self, mutator: &mut MutatorRef<H>, idx: usize, bytes: &[u8]) {
+        let len = self.len();
+        let amt = bytes.len();
+        self.vec.reserve(mutator, amt);
+
+        std::ptr::copy(
+            self.vec.as_ptr().add(idx),
+            self.vec.as_mut_ptr().add(idx + amt),
+            len - idx,
+        );
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.vec.as_mut_ptr().add(idx), amt);
+        self.vec.set_len(len + amt);
+    }
+    #[inline]
+    pub fn insert_str(&mut self, mutator: &mut MutatorRef<H>, idx: usize, string: &str) {
+        assert!(self.is_char_boundary(idx));
+
+        unsafe {
+            self.insert_bytes(mutator, idx, string.as_bytes());
+        }
+    }
+
+    #[inline]
+    pub unsafe fn as_mut_vec(&mut self) -> &mut Vector<u8, H> {
+        &mut self.vec
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    #[inline]
+    #[must_use = "use `.truncate()` if you don't need the other half"]
+    pub fn split_off(&mut self, mutator: &mut MutatorRef<H>, at: usize) -> String<H> {
+        assert!(self.is_char_boundary(at));
+        let other = self.vec.split_off(mutator, at);
+        unsafe { String::from_utf8_unchecked(other) }
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.vec.clear()
+    }
+    pub fn replace_range<R>(&mut self, mutator: &mut MutatorRef<H>, range: R, replace_with: &str)
+    where
+        R: RangeBounds<usize>,
+    {
+        // Memory safety
+        //
+        // Replace_range does not have the memory safety issues of a vector Splice.
+        // of the vector version. The data is just plain bytes.
+
+        // WARNING: Inlining this variable would be unsound (#81138)
+        let start = range.start_bound();
+        match start {
+            std::ops::Bound::Included(&n) => assert!(self.is_char_boundary(n)),
+            std::ops::Bound::Excluded(&n) => assert!(self.is_char_boundary(n + 1)),
+            std::ops::Bound::Unbounded => {}
+        };
+        // WARNING: Inlining this variable would be unsound (#81138)
+        let end = range.end_bound();
+        match end {
+            std::ops::Bound::Included(&n) => assert!(self.is_char_boundary(n + 1)),
+            std::ops::Bound::Excluded(&n) => assert!(self.is_char_boundary(n)),
+            std::ops::Bound::Unbounded => {}
+        };
+
+        // Using `range` again would be unsound (#81138)
+        // We assume the bounds reported by `range` remain the same, but
+        // an adversarial implementation could change between calls
+        unsafe { self.as_mut_vec() }.splice(mutator, (start, end), replace_with.bytes());
+    }
 }
 
 unsafe impl<H: GcBase> Trace for String<H> {
@@ -231,5 +335,41 @@ impl<H: GcBase> Deref for String<H> {
 impl<H: GcBase> DerefMut for String<H> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { std::str::from_utf8_unchecked_mut(self.vec.as_slice_mut()) }
+    }
+}
+
+impl<H: GcBase> std::fmt::Debug for String<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+impl<H: GcBase> std::fmt::Display for String<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, " {}", self.as_str())
+    }
+}
+
+impl<H: GcBase> std::cmp::PartialEq for String<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str().eq(other.as_str())
+    }
+}
+impl<H: GcBase> Eq for String<H> {}
+
+impl<H: GcBase> Hash for String<H> {
+    fn hash<HS: std::hash::Hasher>(&self, state: &mut HS) {
+        self.as_str().hash(state);
+    }
+}
+
+impl<H: GcBase> std::cmp::PartialOrd for String<H> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.as_str().partial_cmp(other.as_str())
+    }
+}
+
+impl<H: GcBase> std::cmp::Ord for String<H> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
     }
 }

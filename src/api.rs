@@ -615,3 +615,5 @@ impl<T: std::cmp::Ord + Collectable, H: GcBase> std::cmp::Ord for Gc<T, H> {
         (**self).cmp(&**other)
     }
 }
+
+unsafe impl Trace for std::str::Bytes<'_> {}
