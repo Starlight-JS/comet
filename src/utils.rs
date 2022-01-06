@@ -66,7 +66,7 @@ impl BitFieldTrait<0, 13> for SizeBitField {
 
 pub struct MarkBit;
 
-impl BitFieldTrait<0, 1> for MarkBit {
+impl BitFieldTrait<14, 1> for MarkBit {
     type Next = Self;
 }
 

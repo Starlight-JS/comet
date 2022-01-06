@@ -2,6 +2,10 @@ use crate::{bitmap::LineMarkTable, utils::align_down};
 
 use super::{space::ImmixSpace, ImmixBlock, IMMIX_BLOCK_SIZE};
 
+/// Represents chunk that contains [ImmixBlock]'s. Each chunk can store up to 128 blocks but
+/// only 127 blocks are available for use because first 32KB of memory is reserved for chunk metadata.
+///
+/// Chunk metadata at the moment contains only line mark table for marking block lines, it takes 2KB of memory per each chunk.
 pub struct Chunk {
     line_mark_bitmap: LineMarkTable,
 }
@@ -46,6 +50,8 @@ impl Chunk {
     pub fn line_mark_table_mut(&mut self) -> &mut LineMarkTable {
         &mut self.line_mark_bitmap
     }
+
+    /// Sweep single chunk. If chunk is empty it's entry in chunk map is cleared
     pub fn sweep(&mut self, space: &ImmixSpace) {
         let mut cursor = 1;
         let mut allocated_blocks = 0;

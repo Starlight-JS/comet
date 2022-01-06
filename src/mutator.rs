@@ -197,7 +197,15 @@ impl<H: GcBase> MutatorRef<H> {
         let heap = unsafe { &mut *self.heap.get() };
         heap.collect(self, keep);
     }
+    pub fn full_collection(&mut self, keep: &mut [&mut dyn Trace]) {
+        let heap = unsafe { &mut *self.heap.get() };
+        heap.full_collection(self, keep);
+    }
 
+    pub fn minor_collection(&mut self, keep: &mut [&mut dyn Trace]) {
+        let heap = unsafe { &mut *self.heap.get() };
+        heap.minor_collection(self, keep);
+    }
     #[inline(always)]
     pub unsafe fn allocate_from_tlab<T: Collectable + Sized + 'static>(
         &mut self,

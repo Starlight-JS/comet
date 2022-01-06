@@ -1,7 +1,9 @@
 use comet_multi::{
+    alloc::vector::Vector,
     api::{Collectable, Finalize, Gc, Trace},
     gc_base::AllocationSpace,
     immix, letroot,
+    minimark::{instantiate_minimark, MiniMarkOptions},
 };
 pub enum Node {
     None,
@@ -22,30 +24,25 @@ unsafe impl Trace for Node {
 unsafe impl Finalize for Node {}
 impl Collectable for Node {}
 fn main() {
-    let mut mutator = immix::instantiate_immix(
-        256 * 1024 * 1024,
-        128 * 1024,
-        4 * 1024 * 1024,
-        128 * 1024 * 1024,
-        true,
-    );
-    let stack = mutator.shadow_stack();
+    let mut options = MiniMarkOptions::default();
+    options.nursery_size = 1 * 1024 * 1024;
+    options.verbose = true;
+    let mut minimark = instantiate_minimark(options);
+    let stack = minimark.shadow_stack();
     letroot!(
         x = stack,
-        mutator.allocate(Node::None, AllocationSpace::New)
+        Vector::<Gc<i32>>::with_capacity(&mut minimark, 4)
     );
 
-    let mut i = 0;
-    while i < 5 * 1024 * 1024 {
-        *x = mutator.allocate(
-            Node::Some {
-                value: 42,
-                next: *x,
-            },
-            AllocationSpace::New,
-        );
-        i += x.allocation_size();
-    }
-    *x = mutator.allocate(Node::None, AllocationSpace::New);
-    mutator.collect(&mut []);
+    minimark.minor_collection(&mut []);
+
+    let y = minimark.allocate(42, AllocationSpace::New);
+    x.push(&mut minimark, y);
+    x.write_barrier(&mut minimark);
+    minimark.full_collection(&mut []);
+
+    assert_eq!(**x.at(0), 42);
+
+    *x = Vector::<Gc<i32>>::new(&mut minimark);
+    minimark.full_collection(&mut []);
 }

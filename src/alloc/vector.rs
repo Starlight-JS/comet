@@ -12,6 +12,10 @@ pub struct Vector<T: Trace + 'static> {
 }
 
 impl<T: Trace + 'static> Vector<T> {
+    pub fn write_barrier(&mut self, mutator: &mut MutatorRef<impl GcBase>) {
+        mutator.write_barrier(self.storage.to_dyn());
+    }
+
     pub fn as_slice<'a>(&'a self) -> &'a [T] {
         unsafe { std::slice::from_raw_parts(self.data(), self.len()) }
     }
@@ -150,15 +154,6 @@ impl<T: Trace + 'static> Vector<T> {
 
     /// `remove_item` removes the first element identical to the supplied `item` using a
     /// left-to-right traversal of the elements.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let mut vec = minivec::mini_vec![0, 1, 1, 1, 2, 3, 4];
-    /// vec.remove_item(&1);
-    ///
-    /// assert_eq!(vec, [0, 1, 1, 2, 3, 4]);
-    /// ```
     ///
     pub fn remove_item<V>(&mut self, item: &V) -> Option<T>
     where

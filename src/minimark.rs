@@ -286,24 +286,6 @@ impl MiniMark {
                 let size = (*object).size();
                 let mut tl_bulk_allocated = 0;
 
-                /* let memory = if size > Rosalloc::LARGE_SIZE_THRESHOLD {
-                    (*(*self.old_space).rosalloc()).alloc_large_object(
-                        size,
-                        &mut 0,
-                        &mut 0,
-                        &mut tl_bulk_allocated,
-                    )
-                } else {
-                    // this malloc call does not have any mutex locks, during minor GC all threads are suspended
-                    // and objects can end up in old_space only from this function, in case we add parallel copying we would need to use
-                    // `Rosalloc::alloc::<true>()` which enables thread safety
-                    (*(*self.old_space).rosalloc()).alloc_from_run_thread_unsafe(
-                        size,
-                        &mut 0,
-                        &mut 0,
-                        &mut tl_bulk_allocated,
-                    )
-                };*/
                 let memory = (*self.old_space).alloc_common::<Self, true>(
                     mutator,
                     size,
@@ -311,6 +293,8 @@ impl MiniMark {
                     &mut 0,
                     &mut tl_bulk_allocated,
                 );
+
+                // No memory left in old space: just abort current process
                 if memory.is_null() {
                     promotion_oom(size, object.cast());
                 }
@@ -338,6 +322,8 @@ impl MiniMark {
                 self.mark_stack.push(object);
             }
         } else {
+            // If we end up here then we're probably processing remembered set
+            // we have to do nothing with old space object.
             debug_assert!((*self.old_space).has_address(object.cast()));
         }
     }
@@ -405,30 +391,7 @@ impl MiniMark {
             }
         });
     }
-    unsafe fn minor(
-        &mut self,
-        mutator: &mut MutatorRef<Self>,
-        keep: &mut [&mut dyn Trace],
-        reason: GcReason,
-    ) -> bool {
-        // threads must be suspended already
-        let time = if self.verbose {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-
-        self.large_space.prepare_for_marking(true);
-        self.large_space.begin_marking(false);
-        let self_thread = mutator;
-        self.before_mark_constraints(self_thread, true);
-        keep.iter_mut().for_each(|item| {
-            item.trace(&mut YoungVisitor {
-                minimark: self,
-                parent_object: null_mut(),
-                mutator: self_thread,
-            });
-        });
+    unsafe fn revoke_tlabs_young(&mut self, self_thread: &mut MutatorRef<Self>) {
         let mut revoke_freed = 0;
         for i in 0..self.mutators.len() {
             let mutator = self.mutators[i];
@@ -446,8 +409,98 @@ impl MiniMark {
         (*(*self.old_space).rosalloc()).revoke_thread_unsafe_current_runs();
         self.num_old_space_allocated
             .fetch_sub(revoke_freed, Ordering::AcqRel);
+    }
+
+    unsafe fn major_marking_phase(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        keep: &mut [&mut dyn Trace],
+    ) {
+        self.before_mark_constraints(mutator, false);
+        keep.iter_mut().for_each(|item| {
+            item.trace(&mut OldVisitor { minimark: self });
+        });
+        let mut revoke_freed = 0;
+        // some of mutators might allocate into TLS runs while performing minor collection
+        // so we iterate all mutators and revoke all runs from them. Note that most of the time
+        // these runs point to `rosalloc::dedicated_full_run()` so revoking is basically no-op and
+        // does not do any time consuming operations.
+        for i in 0..self.mutators.len() {
+            let mutator = self.mutators[i];
+
+            revoke_freed +=
+                (*(*self.old_space).rosalloc()).revoke_thread_local_runs(&mut (*mutator).tlab.runs);
+
+            (*(*self.old_space).rosalloc()).revoke_thread_unsafe_current_runs();
+            (*mutator).reset_tlab();
+            (*mutator)
+                .shadow_stack()
+                .walk(|var| var.trace(&mut OldVisitor { minimark: self }));
+        }
+
+        // process remembered set.
+        //
+        //
+        // Note that at the moment remset is always empty at major collection because our marking phase is not concurrent/incremental
+        while let Some(object) = self.remembered_set.pop() {
+            (*object)
+                .get_dyn()
+                .trace(&mut OldVisitor { minimark: self });
+            (*object).unmark();
+        }
+
+        // Drain mark stack and process object references
+        while let Some(object) = self.old_mark_stack.pop() {
+            (*object)
+                .get_dyn()
+                .trace(&mut OldVisitor { minimark: self });
+            (*object).force_set_color(self.mark_color);
+        }
+        self.after_mark_constraints(mutator, false);
+        let color = self.mark_color;
+
+        // Get rid of dead weak references
+        self.weak_refs.retain_mut(|object| {
+            let header = object.base();
+            if (*header).get_color() == color {
+                object.after_mark(|header| {
+                    if (*header).get_color() == color {
+                        header
+                    } else {
+                        null_mut()
+                    }
+                });
+                true
+            } else {
+                false
+            }
+        });
+
+        self.num_old_space_allocated
+            .fetch_sub(revoke_freed, Ordering::Relaxed);
+    }
+
+    unsafe fn minor_marking_phase(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        keep: &mut [&mut dyn Trace],
+    ) {
+        self.large_space.prepare_for_marking(true);
+        self.large_space.begin_marking(false);
+        let self_thread = mutator;
+        self.before_mark_constraints(self_thread, true);
+        self.revoke_tlabs_young(self_thread);
+
+        keep.iter_mut().for_each(|item| {
+            item.trace(&mut YoungVisitor {
+                minimark: self,
+                parent_object: null_mut(),
+                mutator: self_thread,
+            });
+        });
 
         while let Some(object) = self.remembered_set.pop() {
+            println!("remembered");
             (*object).get_dyn().trace(&mut YoungVisitor {
                 minimark: self,
                 parent_object: object,
@@ -465,6 +518,23 @@ impl MiniMark {
             (*object).set_color(GC_GREY, GC_BLACK);
         }
         self.after_mark_constraints(self_thread, true);
+    }
+    unsafe fn minor(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        keep: &mut [&mut dyn Trace],
+        reason: GcReason,
+    ) -> bool {
+        // threads must be suspended already
+        let time = if self.verbose {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+
+        self.large_space.prepare_for_marking(true);
+        self.large_space.begin_marking(false);
+        self.minor_marking_phase(mutator, keep);
         let nursery_start = self.nursery.start();
         let nursery_end = self.nursery.end();
         let is_young = |ptr: *mut HeapObjectHeader| {
@@ -473,32 +543,32 @@ impl MiniMark {
         };
         self.weak_refs.retain_mut(|object| {
             let header = object.base();
-            if (*header).is_forwarded() {
-                object.set_base((*header).vtable() as _);
-                object.after_mark(|header| {
-                    if !(*header).is_forwarded() && is_young(header) {
-                        null_mut()
-                    } else if (*header).is_forwarded() {
-                        (*header).vtable() as *mut HeapObjectHeader
-                    } else {
-                        // LOS or old space object
-                        header
-                    }
-                });
-                true
+            if is_young(header) {
+                if (*header).is_forwarded() {
+                    object.set_base((*header).vtable() as _);
+                    object.after_mark(|header| {
+                        if !(*header).is_forwarded() && is_young(header) {
+                            null_mut()
+                        } else if (*header).is_forwarded() {
+                            (*header).vtable() as *mut HeapObjectHeader
+                        } else {
+                            // LOS or old space object
+                            header
+                        }
+                    });
+                    true
+                } else {
+                    false
+                }
             } else {
-                // old weak refs are processed in major collection
-                !is_young(object.base())
+                true
             }
         });
         self.large_space.prepare_for_allocation(true);
         self.large_space.sweep();
 
         self.nursery.reset();
-        /*if conc_sweep {
-            let total_bytes = bytes + self.large_space.bytes;
-            self.set_major_threshold_from(total_bytes as f64 * self.major_collection_threshold);
-        }*/
+
         if let Some(time) = time {
             let elapsed = time.elapsed();
             eprintln!(
@@ -533,73 +603,16 @@ impl MiniMark {
         } else {
             None
         };
-        self.before_mark_constraints(mutator, false);
-        keep.iter_mut().for_each(|item| {
-            item.trace(&mut OldVisitor { minimark: self });
-        });
-
-        for i in 0..self.mutators.len() {
-            let mutator = self.mutators[i];
-            (*mutator).reset_tlab();
-            (*mutator)
-                .shadow_stack()
-                .walk(|var| var.trace(&mut OldVisitor { minimark: self }));
-        }
-
-        while let Some(object) = self.remembered_set.pop() {
-            (*object)
-                .get_dyn()
-                .trace(&mut OldVisitor { minimark: self });
-            (*object).unmark();
-        }
-
-        while let Some(object) = self.old_mark_stack.pop() {
-            (*object)
-                .get_dyn()
-                .trace(&mut OldVisitor { minimark: self });
-            (*object).force_set_color(self.mark_color);
-        }
-        self.after_mark_constraints(mutator, false);
-        let color = self.mark_color;
-        self.weak_refs.retain_mut(|object| {
-            let header = object.base();
-            if (*header).get_color() == color {
-                object.after_mark(|header| {
-                    if (*header).get_color() == color {
-                        header
-                    } else {
-                        null_mut()
-                    }
-                });
-                true
-            } else {
-                false
-            }
-        });
-
-        self.large_space.prepare_for_allocation(false);
-        self.large_space.sweep();
         let prev = self.num_old_space_allocated.load(Ordering::Relaxed) + self.large_space.bytes;
-        // some of mutators might allocate into TLS runs while performing minor collection
-        // so we iterate all mutators and revoke all runs from them. Note that most of the time
-        // these runs point to `rosalloc::dedicated_full_run()` so revoking is basically no-op and
-        // does not do any time consuming operations.
-        let mut revoke_freed = 0;
-        for i in 0..self.mutators.len() {
-            let mutator = self.mutators[i];
-            revoke_freed +=
-                (*(*self.old_space).rosalloc()).revoke_thread_local_runs(&mut (*mutator).tlab.runs);
-        }
+        self.major_marking_phase(mutator, keep);
 
-        (*(*self.old_space).rosalloc()).revoke_thread_unsafe_current_runs();
-        std::mem::swap(&mut self.alloc_color, &mut self.mark_color);
         let rosalloc = self.old_space as usize;
         let sweep_color = self.alloc_color;
         let keep_color = self.mark_color;
         let this = self as *mut Self as usize;
-        //std::mem::swap(&mut self.alloc_color, &mut self.mark_color);
-        self.num_old_space_allocated
-            .fetch_sub(revoke_freed, Ordering::Relaxed);
+
+        self.large_space.prepare_for_allocation(false);
+        self.large_space.sweep();
         self.gc_state.store(MajorPhase::Sweeping, Ordering::Relaxed);
 
         let rosalloc = rosalloc as *mut RosAllocSpace;
@@ -896,6 +909,7 @@ impl GcBase for MiniMark {
     ) -> Weak<T> {
         let weak_ref = Weak::create(mutator, value);
         self.global_heap_lock.lock();
+
         self.weak_refs.push(weak_ref.to_dyn());
         unsafe {
             self.global_heap_lock.unlock();
@@ -1180,5 +1194,68 @@ fn print_color(c: u8) -> &'static str {
         GC_GREY => "grey",
         GC_BLACK => "black",
         _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{alloc::vector::Vector, api::Gc, gc_base::AllocationSpace};
+
+    use super::{instantiate_minimark, MiniMarkOptions};
+
+    #[test]
+    fn test_weak_refs() {
+        let mut options = MiniMarkOptions::default();
+        options.nursery_size = 1 * 1024 * 1024;
+        options.verbose = true;
+        let mut minimark = instantiate_minimark(options);
+
+        let value = minimark.allocate(42, crate::gc_base::AllocationSpace::New);
+        letroot!(
+            rooted = minimark.shadow_stack(),
+            minimark.allocate(44, crate::gc_base::AllocationSpace::New)
+        );
+
+        letroot!(
+            weak1 = minimark.shadow_stack(),
+            minimark.allocate_weak(value)
+        );
+        letroot!(
+            weak2 = minimark.shadow_stack(),
+            minimark.allocate_weak(*rooted)
+        );
+
+        assert_eq!(*weak1.upgrade().unwrap(), 42);
+        assert_eq!(*weak2.upgrade().unwrap(), 44);
+
+        minimark.collect(&mut []);
+
+        assert!(weak1.upgrade().is_none());
+        assert_eq!(*weak2.upgrade().unwrap(), 44);
+    }
+
+    #[test]
+    fn test_write_barrier() {
+        let mut options = MiniMarkOptions::default();
+        options.nursery_size = 1 * 1024 * 1024;
+        options.verbose = true;
+        let mut minimark = instantiate_minimark(options);
+        let stack = minimark.shadow_stack();
+        letroot!(
+            x = stack,
+            Vector::<Gc<i32>>::with_capacity(&mut minimark, 4)
+        );
+
+        minimark.minor_collection(&mut []);
+
+        let y = minimark.allocate(42, AllocationSpace::New);
+        x.push(&mut minimark, y);
+        x.write_barrier(&mut minimark);
+        minimark.full_collection(&mut []);
+
+        assert_eq!(**x.at(0), 42);
+
+        *x = Vector::<Gc<i32>>::new(&mut minimark);
+        minimark.full_collection(&mut []);
     }
 }

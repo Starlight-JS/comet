@@ -91,6 +91,8 @@ impl ImmixSpace {
     pub fn reserved_pages(&self) -> usize {
         self.free_blocks.len() * PAGE_SIZE
     }
+
+    /// Release block by adding it to free list. On Unix platforms it does `madvise` with `MADV_DONTNEED`.
     pub fn release_block(&self, block: *mut ImmixBlock) {
         unsafe {
             (*block).deinit();
@@ -98,6 +100,8 @@ impl ImmixSpace {
             self.free_blocks.push(block);
         }
     }
+
+    /// Get block from free list and initialize it.
     pub fn get_clean_block(&self) -> *mut ImmixBlock {
         let block = self.free_blocks.pop();
         if block.is_null() {
@@ -112,6 +116,7 @@ impl ImmixSpace {
         }
     }
 
+    /// Get first reusable block
     pub fn get_reusable_block(&self) -> *mut ImmixBlock {
         let block = self.reusable_blocks.pop();
         if block.is_null() {
@@ -131,6 +136,7 @@ impl ImmixSpace {
     pub fn object_to_line_num(object: *const u8) -> usize {
         (object as usize % IMMIX_BLOCK_SIZE) / IMMIX_LINE_SIZE
     }
+    /// Mark lines for an object. If object is allocated in multiple lines multiple lines are marked.
     pub fn mark_lines(&self, object: *const HeapObjectHeader) {
         unsafe {
             let block = ImmixBlock::align(object.cast()).cast::<ImmixBlock>();
@@ -152,7 +158,8 @@ impl ImmixSpace {
             }
         }
     }
-
+    /// Prepare for marking phase by settings all blocks state to unamrked and possibly clearing
+    /// line mark table if `major_gc` is true.
     pub fn prepare(&self, major_gc: bool) {
         self.chunk_map.visit_marked_range(
             self.map.aligned_start(),
@@ -174,6 +181,9 @@ impl ImmixSpace {
             },
         );
     }
+
+    /// Release dead memory after GC cycle. This function will walk all alive chunks
+    /// and sweep allocated blocks in each chunk.
     pub fn release(&self) {
         self.reusable_blocks.reset();
         self.free_blocks.reset();

@@ -11,6 +11,9 @@ pub enum BlockState {
     Reusable { unavailable_lines: u8 },
 }
 
+/// A immix block is a page aligned container for heap-allocated objects.
+/// Objects are allocated within lines of the block. Each blocks has 128 lines of size 256 bytes each
+/// but only 127 lines are available for allocation (first line is reserved for block header).
 #[repr(C)]
 pub struct ImmixBlock {
     next: *mut Self,
@@ -85,6 +88,7 @@ impl ImmixBlock {
         self.end()
     }
 
+    /// Searches for first "hole" in a block. Hole is a memory region from first unmarked line to first marked line.
     pub fn find_hole(search_start: *mut u8) -> (*mut u8, *mut u8) {
         unsafe {
             let block = Self::align(search_start).cast::<Self>();
@@ -97,10 +101,12 @@ impl ImmixBlock {
             while cursor < IMMIX_LINES_PER_BLOCK {
                 let mark = line_mark_bitmap.test((*block).line(cursor as _));
                 if !mark {
+                    // we found unmarked line! Exit the loop
                     break;
                 }
                 cursor += 1;
             }
+            // if search cursor reached limit there is no free lines in a block
             if cursor == IMMIX_LINES_PER_BLOCK {
                 return (null_mut(), null_mut());
             }
@@ -108,11 +114,14 @@ impl ImmixBlock {
             let start = search_start.add((cursor - start_cursor) << 8);
             while cursor < IMMIX_LINES_PER_BLOCK {
                 if line_mark_bitmap.test((*block).line(cursor as _)) {
+                    // we found marked line! Exit the loop
                     break;
                 }
                 cursor += 1;
             }
+
             let end = search_start.add((cursor - start_cursor) << 8);
+            // Now return memory that can be used for allocation from start to end.
             (start, end)
         }
     }
@@ -121,8 +130,10 @@ impl ImmixBlock {
         align_down(addr as _, IMMIX_BLOCK_SIZE) as _
     }
 
+    /// Sweep Immix block. Returns `true` if block is dead.
     pub fn sweep(&mut self, space: &ImmixSpace) -> bool {
         if self.state == BlockState::Unallocated {
+            // unallocated blocks go to free list instantly
             space.free_blocks.push(self as *mut Self);
             return true;
         }
@@ -131,25 +142,32 @@ impl ImmixBlock {
         let mut marked_lines = 0;
 
         for i in 1..IMMIX_LINES_PER_BLOCK {
+            // count number of marked lines so we can update num_bytes_allocated
             if line_mark_table.test(self.line(i as _)) {
                 marked_lines += 1;
             }
         }
         if marked_lines == 0 {
+            // zero marked lines means object does not have live object. Release it and add to free list
             space.release_block(self as *mut Self);
 
             true
         } else {
+            // Block has at least 1 marked line. Keep it and increase num_bytes_allocated with memory that
+            // is occupied by marked lines
             space
                 .num_bytes_allocated
                 .fetch_add(marked_lines * IMMIX_LINE_SIZE, Ordering::Relaxed);
 
             if marked_lines != IMMIX_LINES_PER_BLOCK - 1 {
+                // block has unmarked lines that are available for allocation, mark it as reusable
+                // and push to reusable list
                 self.state = BlockState::Reusable {
                     unavailable_lines: marked_lines as u8,
                 };
                 space.reusable_blocks.push(self as *mut Self);
             } else {
+                // block has all lines as marked, mark it as unmarked
                 self.state = BlockState::Unmarked;
             }
             false
