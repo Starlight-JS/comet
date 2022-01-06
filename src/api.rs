@@ -1,4 +1,5 @@
 use std::{
+    hash::Hash,
     hint::unreachable_unchecked,
     marker::PhantomData,
     mem::{size_of, MaybeUninit},
@@ -584,3 +585,33 @@ impl<T: PartialEq + Collectable, H: GcBase> PartialEq for Gc<T, H> {
 }
 
 impl<T: Eq + Collectable, H: GcBase> Eq for Gc<T, H> {}
+
+impl<T: Hash + Collectable, H: GcBase> Hash for Gc<T, H> {
+    fn hash<HS: std::hash::Hasher>(&self, state: &mut HS) {
+        (**self).hash(state);
+    }
+}
+
+impl<T: std::fmt::Debug + Collectable, H: GcBase> std::fmt::Debug for Gc<T, H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", **self)
+    }
+}
+
+impl<T: std::fmt::Display + Collectable, H: GcBase> std::fmt::Display for Gc<T, H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", **self)
+    }
+}
+
+impl<T: std::cmp::PartialOrd + Collectable, H: GcBase> std::cmp::PartialOrd for Gc<T, H> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        (**self).partial_cmp(&**other)
+    }
+}
+
+impl<T: std::cmp::Ord + Collectable, H: GcBase> std::cmp::Ord for Gc<T, H> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (**self).cmp(&**other)
+    }
+}
