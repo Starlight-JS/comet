@@ -3,7 +3,7 @@ use std::{
     hint::unreachable_unchecked,
     marker::PhantomData,
     mem::{size_of, MaybeUninit},
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Range},
     ptr::{null_mut, NonNull},
     sync::atomic::AtomicU16,
 };
@@ -617,3 +617,10 @@ impl<T: std::cmp::Ord + Collectable, H: GcBase> std::cmp::Ord for Gc<T, H> {
 }
 
 unsafe impl Trace for std::str::Bytes<'_> {}
+
+unsafe impl<T: Trace> Trace for Range<T> {
+    fn trace(&mut self, vis: &mut dyn Visitor) {
+        self.start.trace(vis);
+        self.end.trace(vis);
+    }
+}
