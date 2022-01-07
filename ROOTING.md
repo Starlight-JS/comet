@@ -104,7 +104,7 @@ impl HandleList {
         self.handles.get(ix)
     }
 
-    pub fn get_mut(&mut self,ix: usize) -> Option<&mut Gc<Dyn Collectable,Immix>> {
+    pub fn get_mut(&mut self,ix: usize) -> Option<&mut Gc<dyn Collectable,Immix>> {
         self.handles.get_mut(ix)
     }
 }
@@ -145,7 +145,7 @@ fn main() {
     let val = mutator.allocate(42,AllocationSpace::New);
     let val = handle_list.add(val);
     mutator.collect(&mut []);
-    println!("{}",*handle_list.get(val).unwrap());
+    println!("{}",*handle_list.get(val.to_dyn()).unwrap());
 }
 
 ```
