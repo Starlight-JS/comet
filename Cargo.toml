@@ -1,39 +1,5 @@
-[package]
-name = "comet-multi"
-version = "0.1.0"
-edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[workspace]
+members = ["crates/comet", "crates/comet-extra"]
 
-[dependencies]
-mopa = "0.2"
-libc = "0.2.98"
-ahash = "0.7"
-hashbrown = "0.11"
-atomic = "0.5"
-threadfin = "0.1"
-parking_lot = "0.11"
-scoped_threadpool = "0.1"
-crossbeam-deque = "0.8"
-bit-vec = "0.6"
-rand = "0.8"
-flume = "0.10"
-rosalloc = { git = "https://github.com/playxe/rosalloc" }
-#rosalloc = { path = "rosalloc" }
-im = "15.0"
-memx = "0.1"
-[target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = [
-    "memoryapi",
-    "winnt",
-    "sysinfoapi",
-    "minwinbase",
-    "errhandlingapi",
-    "excpt",
-    "minwindef",
-    "wincrypt",
-] }
-
-[profile.release]
-
-[features]
+default-members = ["crates/comet"]

@@ -12,6 +12,10 @@ Comet is a collection of various [trace-based garbage collectors](https://en.wik
 Comet is fast & easy to use GC library and you can simply plug it in into your runtime with as less hassle as possible. Comet implements a few GC policies where each has their own tradeoffs but generally all of the policies are quite performant. 
 
 
+# Precise collection
+
+All the GC policies are 'precise' in that they know the layout of allocations (which is used to determine reachable children) and also the location of all stack roots. This means they do not need to resort to conservative techniques that may cause garbage to be retained unnecessarily. To keep stack roots we use shadow stack and for use of Comet you ***must*** read ROOTING.md
+
 ## GC Policies
 
 ### SemiSpace
