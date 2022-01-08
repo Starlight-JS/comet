@@ -1,13 +1,12 @@
 use std::{
     cell::UnsafeCell,
     marker::PhantomData,
-    mem::size_of,
     ptr::{null_mut, NonNull},
     sync::{atomic::AtomicUsize, Arc},
 };
 
 use crate::{
-    api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak},
+    api::{Collectable, Gc, Trace, Visitor, Weak},
     mutator::{Mutator, MutatorRef},
     rosalloc_space::RosAllocSpace,
     safepoint::GlobalSafepoint,

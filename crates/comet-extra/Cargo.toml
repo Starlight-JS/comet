@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 comet = { path = "../comet" }
+cfg-if = "1.0.0"
+ahash = "0.7"
