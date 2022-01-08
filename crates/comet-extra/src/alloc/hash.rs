@@ -248,6 +248,78 @@ impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> HashMap<Key, Va
             }
         }
     }
+
+    pub fn iter(&self) -> HashMapConstIterator<'_, Key, Value, H, S> {
+        HashMapConstIterator {
+            current: None,
+            map: self,
+            index: 0,
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> HashMapMutIterator<'_, Key, Value, H, S> {
+        HashMapMutIterator {
+            current: None,
+            map: self,
+            index: 0,
+        }
+    }
+}
+
+pub struct HashMapConstIterator<'a, K: Trace + 'static, V: Trace + 'static, H: GcBase, S> {
+    map: &'a HashMap<K, V, H, S>,
+    current: Option<&'a Option<Gc<Entry<K, V, H>, H>>>,
+    index: usize,
+}
+
+impl<'a, K: Trace + 'static, V: Trace + 'static, H: GcBase, S> Iterator
+    for HashMapConstIterator<'a, K, V, H, S>
+{
+    type Item = (&'a K, &'a V);
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(current) = self.current {
+            if let Some(cur) = current {
+                self.current = Some(&cur.next);
+                return Some((&cur.key, &cur.value));
+            }
+        }
+        if self.index >= self.map.capacity() {
+            return None;
+        }
+        self.current = Some(&self.map.table[self.index]);
+        self.index += 1;
+        self.next()
+    }
+}
+
+pub struct HashMapMutIterator<'a, K: Trace + 'static, V: Trace + 'static, H: GcBase, S> {
+    map: &'a mut HashMap<K, V, H, S>,
+    current: Option<*mut Option<Gc<Entry<K, V, H>, H>>>,
+    index: usize,
+}
+
+impl<'a, K: Trace + 'static, V: Trace + 'static, H: GcBase, S> Iterator
+    for HashMapMutIterator<'a, K, V, H, S>
+{
+    type Item = (&'a K, &'a mut V);
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            if let Some(current) = self.current {
+                if let Some(cur) = &mut *current {
+                    let key = &mut cur.key as *mut K;
+                    let val = &mut cur.value as *mut V;
+                    self.current = Some(&mut cur.next);
+                    return Some((&*key, &mut *val));
+                }
+            }
+            if self.index >= self.map.capacity() {
+                return None;
+            }
+            self.current = Some(&mut self.map.table[self.index]);
+            self.index += 1;
+            self.next()
+        }
+    }
 }
 
 #[inline]
@@ -267,7 +339,15 @@ unsafe impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> Trace
         self.table.trace(vis);
     }
 }
+unsafe impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> Finalize
+    for HashMap<Key, Value, H, S>
+{
+}
 
+impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S: 'static> Collectable
+    for HashMap<Key, Value, H, S>
+{
+}
 #[cfg(test)]
 mod test_map {
     use comet::letroot;
@@ -353,3 +433,96 @@ mod test_map {
         }
     }
 }
+
+pub struct HashSet<K: Trace + 'static, H: GcBase, S = RandomState> {
+    map: HashMap<K, (), H, S>,
+}
+
+impl<K: Trace + 'static, H: GcBase, S> HashSet<K, H, S> {
+    pub fn with_capacity_and_hasher(
+        mutator: &mut MutatorRef<H>,
+        capacity: usize,
+        hash_builder: S,
+    ) -> Self {
+        Self {
+            map: HashMap::with_capacity_and_hasher(mutator, capacity, hash_builder),
+        }
+    }
+
+    pub fn with_hasher(mutator: &mut MutatorRef<H>, hash_builder: S) -> Self {
+        Self {
+            map: HashMap::with_hasher(mutator, hash_builder),
+        }
+    }
+
+    pub fn insert(&mut self, mutator: &mut MutatorRef<H>, key: K) -> bool
+    where
+        S: BuildHasher,
+        K: Hash + Eq,
+    {
+        self.map.insert(mutator, key, ())
+    }
+
+    pub fn contains(&self, key: &K) -> bool
+    where
+        S: BuildHasher,
+        K: Hash + Eq,
+    {
+        self.map.contains_key(key)
+    }
+
+    pub fn remove(&mut self, key: &K) -> bool
+    where
+        S: BuildHasher,
+        K: Hash + Eq,
+    {
+        self.map.remove(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.map.capacity()
+    }
+
+    pub fn iter(&self) -> HashSetIterator<'_, K, H, S> {
+        HashSetIterator {
+            iter: self.map.iter(),
+        }
+    }
+}
+
+pub struct HashSetIterator<'a, K: Trace + 'static, H: GcBase, S> {
+    iter: HashMapConstIterator<'a, K, (), H, S>,
+}
+
+impl<'a, K: Trace + 'static, H: GcBase, S> Iterator for HashSetIterator<'a, K, H, S> {
+    type Item = &'a K;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|x| x.0)
+    }
+}
+
+impl<K: Trace + 'static, H: GcBase> HashSet<K, H, DefaultHashBuilder> {
+    pub fn new(mutator: &mut MutatorRef<H>) -> Self {
+        Self {
+            map: HashMap::new(mutator),
+        }
+    }
+
+    pub fn with_capacity(mutator: &mut MutatorRef<H>, capacity: usize) -> Self {
+        Self {
+            map: HashMap::with_capacity(mutator, capacity),
+        }
+    }
+}
+unsafe impl<Key: Trace + 'static, H: GcBase, S> Trace for HashSet<Key, H, S> {
+    fn trace(&mut self, vis: &mut dyn comet::api::Visitor) {
+        self.map.trace(vis);
+    }
+}
+unsafe impl<Key: Trace + 'static, H: GcBase, S> Finalize for HashSet<Key, H, S> {}
+
+impl<Key: Trace + 'static, H: GcBase, S: 'static> Collectable for HashSet<Key, H, S> {}
