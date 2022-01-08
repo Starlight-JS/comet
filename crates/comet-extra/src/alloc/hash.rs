@@ -1,8 +1,4 @@
-use std::{
-    borrow::Borrow,
-    hash::{BuildHasher, Hash},
-};
-
+use super::array::Array;
 use ahash::RandomState;
 use comet::{
     api::{Collectable, Finalize, Gc, Trace},
@@ -10,10 +6,11 @@ use comet::{
     letroot,
     mutator::MutatorRef,
 };
-
+use std::{
+    borrow::Borrow,
+    hash::{BuildHasher, Hash},
+};
 const THRESHOLD: f64 = 0.75;
-
-use super::vector::Vector;
 
 struct Entry<Key: Trace + 'static, Value: Trace + 'static, H: GcBase> {
     key: Key,
@@ -37,7 +34,7 @@ impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase> Collectable for En
 pub struct HashMap<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S = RandomState> {
     hash_builder: S,
     len: usize,
-    table: Vector<Option<Gc<Entry<Key, Value, H>, H>>, H>,
+    table: Gc<Array<Option<Gc<Entry<Key, Value, H>, H>>>, H>,
 }
 
 pub type DefaultHashBuilder = ahash::RandomState;
@@ -56,26 +53,44 @@ impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase>
 impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> HashMap<Key, Value, H, S> {
     pub fn with_capacity_and_hasher(
         mutator: &mut MutatorRef<H>,
-        capacity: usize,
+        mut capacity: usize,
         hash_builder: S,
     ) -> Self {
+        if capacity < 1 {
+            capacity = 4;
+        }
         Self {
             hash_builder,
             len: 0,
-            table: Vector::with_capacity(mutator, capacity),
+            table: Array::new_with_default(mutator, capacity),
         }
     }
-    pub fn with_hasher(mutator: &mut MutatorRef<H>, hash_builder: S) -> Self {
+    pub fn with_hasher(mut mutator: &mut MutatorRef<H>, hash_builder: S) -> Self {
         Self {
             hash_builder,
             len: 0,
-            table: Vector::with_capacity(mutator, 0),
+            table: Array::from_slice(&mut mutator, [None; 4]),
         }
     }
 
     fn resize(&mut self, mutator: &mut MutatorRef<H>) {
-        let size = self.table.len();
-        self.table.resize(mutator, size * 2, None);
+        let stack = mutator.shadow_stack();
+        letroot!(prev_table = stack, self.table);
+        self.table = Array::new_with_default(mutator, self.capacity() * 2);
+        let new_len = self.table.len();
+        let mut node;
+        let mut next;
+        for i in 0..prev_table.len() {
+            node = prev_table[i];
+            while let Some(mut n) = node {
+                next = n.next;
+
+                let pos = (n.hash % new_len as u64) as usize;
+                n.next = self.table[pos];
+                self.table[pos] = Some(n);
+                node = next;
+            }
+        }
     }
 
     #[inline]
@@ -141,6 +156,7 @@ impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> HashMap<Key, Va
         let hash = make_hash::<&Key, Key, S>(&self.hash_builder, key);
         let position = (hash % self.table.len() as u64) as usize;
         let mut node = self.table.at(position);
+
         while let Some(n) = node {
             if n.hash == hash && &n.key == key {
                 return Some(&n.value);
@@ -166,7 +182,27 @@ impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> HashMap<Key, Va
         }
         None
     }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 
+    pub fn contains_key(&self, key: &Key) -> bool
+    where
+        Key: Hash + Eq,
+        S: BuildHasher,
+    {
+        let hash = make_hash::<&Key, Key, S>(&self.hash_builder, key);
+        let position = (hash % self.table.len() as u64) as usize;
+        let mut node = self.table.at(position);
+        while let Some(n) = node {
+            if n.hash == hash && &n.key == key {
+                return true;
+            }
+            node = &n.next;
+        }
+
+        false
+    }
     pub fn remove(&mut self, key: &Key) -> bool
     where
         Key: Hash + Eq,
@@ -229,5 +265,91 @@ unsafe impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> Trace
 {
     fn trace(&mut self, vis: &mut dyn comet::api::Visitor) {
         self.table.trace(vis);
+    }
+}
+
+#[cfg(test)]
+mod test_map {
+    use comet::letroot;
+
+    use crate::{alloc::hash::HashMap, create_heap_for_tests};
+
+    #[test]
+    fn test_insert() {
+        let mut heap = create_heap_for_tests();
+        letroot!(m = heap.shadow_stack(), HashMap::new(&mut heap));
+
+        assert_eq!(m.len(), 0);
+        assert!(m.insert(&mut heap, 1, 2));
+        assert_eq!(m.len(), 1);
+        assert!(m.insert(&mut heap, 2, 4));
+        assert_eq!(m.len(), 2);
+        assert_eq!(*m.get(&1).unwrap(), 2);
+        assert_eq!(*m.get(&2).unwrap(), 4);
+    }
+    #[test]
+    fn test_lots_of_insertions() {
+        let mut heap = create_heap_for_tests();
+        letroot!(
+            m = heap.shadow_stack(),
+            HashMap::<i32, i32, _, _>::new(&mut heap)
+        );
+        // Try this a few times to make sure we never screw up the hashmap's
+        // internal state.
+        for _ in 0..10 {
+            assert!(m.is_empty());
+
+            for i in 1..1001 {
+                assert!(m.insert(&mut heap, i, i));
+
+                for j in 1..=i {
+                    let r = m.get(&j);
+                    assert_eq!(r, Some(&j));
+                }
+
+                for j in i + 1..1001 {
+                    let r = m.get(&j);
+                    assert_eq!(r, None);
+                }
+            }
+
+            for i in 1001..2001 {
+                assert!(!m.contains_key(&i));
+            }
+
+            // remove forwards
+            for i in 1..1001 {
+                assert!(m.remove(&i));
+
+                for j in 1..=i {
+                    assert!(!m.contains_key(&j));
+                }
+
+                for j in i + 1..1001 {
+                    assert!(m.contains_key(&j));
+                }
+            }
+
+            for i in 1..1001 {
+                assert!(!m.contains_key(&i));
+            }
+
+            for i in 1..1001 {
+                assert!(m.insert(&mut heap, i, i));
+            }
+
+            // remove backwards
+            for i in (1..1001).rev() {
+                assert!(m.remove(&i));
+
+                for j in i..1001 {
+                    assert!(!m.contains_key(&j));
+                }
+
+                for j in 1..i {
+                    assert!(m.contains_key(&j));
+                }
+            }
+        }
     }
 }

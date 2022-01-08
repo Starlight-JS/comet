@@ -20,6 +20,24 @@ pub struct Array<T: Trace + 'static> {
 }
 
 impl<T: Trace + 'static> Array<T> {
+    pub fn new_with_default<H: GcBase>(mutator: &mut MutatorRef<H>, len: usize) -> Gc<Array<T>, H>
+    where
+        T: Default,
+    {
+        let mut this = mutator.allocate(
+            Self {
+                length: len as _,
+                is_inited: false,
+                values: [],
+            },
+            AllocationSpace::New,
+        );
+        for i in 0..len {
+            this[i] = T::default();
+        }
+        mutator.write_barrier(this.to_dyn());
+        this
+    }
     pub fn from_slice<H: GcBase, const N: usize>(
         mutator: &mut MutatorRef<H>,
         slice: [T; N],

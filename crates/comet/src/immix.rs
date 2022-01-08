@@ -808,6 +808,9 @@ impl Defrag {
 impl Drop for Immix {
     fn drop(&mut self) {
         unsafe {
+            if self.verbose {
+                eprintln!("Dispose immix space at {:p}", self);
+            }
             Box::from_raw(self.space as *const ImmixSpace as *mut ImmixSpace);
         }
     }
