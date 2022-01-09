@@ -16,6 +16,11 @@ Comet is fast & easy to use GC library and you can simply plug it in into your r
 
 All the GC policies are 'precise' in that they know the layout of allocations (which is used to determine reachable children) and also the location of all stack roots. This means they do not need to resort to conservative techniques that may cause garbage to be retained unnecessarily. To keep stack roots we use shadow stack and for use of Comet you ***must*** read ROOTING.md
 
+
+# Finalization support
+
+Comet supports invoking object finalizers but it does not support "complex" finalizers i.e finalizers that might need special ordering of execution or might revive object. If your finalizer revies object it is UB. Also using finalizers slow downs your program and you should use allocate finalizeable objects on GC heap in very rare cases like file handles. If you need replacement for `std` containers you can use `comet_extra::alloc` module that provides properly GC allocated container types. 
+
 ## GC Policies
 
 ### SemiSpace

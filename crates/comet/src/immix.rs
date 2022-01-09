@@ -24,6 +24,7 @@ use crate::{
     utils::align_down,
 };
 use atomic::Ordering;
+use im::Vector;
 use rosalloc::defs::PAGE_SIZE;
 use std::{cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc};
 use std::{
@@ -289,6 +290,8 @@ pub struct Immix {
     total_gcs: usize,
     weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
+    finalize_list: Vector<*mut HeapObjectHeader>,
+    finalize_list_lock: Lock,
 }
 
 impl GetImmixSpace for Immix {
@@ -318,6 +321,8 @@ pub fn instantiate_immix(
         large_space_lock: Lock::INIT,
         verbose,
         global_heap_lock: Lock::INIT,
+        finalize_list_lock: Lock::INIT,
+        finalize_list: Vector::new(),
         mutators: vec![],
         safepoint: GlobalSafepoint::new(),
         alloc_color: GC_WHITE,
@@ -482,6 +487,18 @@ impl GcBase for Immix {
                         false
                     }
                 });
+                self.finalize_list_lock.lock();
+                self.finalize_list.retain(|object| {
+                    let object = *object;
+                    // if objecct is unmarked we invoke finalizer.
+                    if (*object).get_color() != mark_color {
+                        (*object).get_dyn().finalize();
+                        false
+                    } else {
+                        true
+                    }
+                });
+                self.finalize_list_lock.unlock();
                 self.large_space.sweep();
                 self.large_space.prepare_for_allocation(false);
                 self.space.release();
@@ -595,6 +612,11 @@ impl GcBase for Immix {
         unsafe {
             let base = value.base.as_ptr();
             (*base).force_set_color(self.alloc_color);
+            if std::mem::needs_drop::<T>() {
+                self.finalize_list_lock.lock();
+                self.finalize_list.push_front(base);
+                self.finalize_list_lock.unlock();
+            }
         }
     }
 }

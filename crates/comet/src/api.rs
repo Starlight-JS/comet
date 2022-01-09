@@ -70,7 +70,18 @@ pub trait Collectable: Trace + Finalize + mopa::Any {
 
 mopafy!(Collectable);
 
+/// Indicates a type that can be finalized after marking phase.
+///
+/// # Notes
+///
+/// - Finalizers are not guaranteed to run in the GC cycle, they might run in background threads
+/// - Finalizers are not guaranteed to run at all if some collector does not support them
+/// - Finalizers make GC performance worser because the more finalizable objects you have in GC heap
+///   the more checks in GC cycle might be performed
+/// - Finalizers that revive objects are UB
+/// - There is no strict ordering for execution of finalizers
 pub unsafe trait Finalize {
+    /// Finalization method, invoked when object is dead.
     unsafe fn finalize(&mut self) {
         std::ptr::drop_in_place(self)
     }
