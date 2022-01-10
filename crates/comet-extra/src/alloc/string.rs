@@ -468,3 +468,14 @@ impl std::fmt::Debug for Str {
         write!(f, "{:?}", self)
     }
 }
+impl PartialEq<str> for Str {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl<Heap: GcBase> PartialEq<str> for String<Heap> {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
