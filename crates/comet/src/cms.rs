@@ -46,6 +46,7 @@
 //! we simply switch to Degraded GC. At the end of the sweeping threshold is updated to be current_heap_size + 50% of current heap size.
 //! This allows us to perform concurrent cycles more often without going to degraded cycles.
 
+pub mod block;
 pub mod marker;
 pub mod marking_worklist;
 pub mod write_barrier;
