@@ -25,6 +25,7 @@ use crate::{
 };
 
 use atomic::Ordering;
+use im::Vector;
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 
 pub struct SemiSpace {
@@ -38,6 +39,8 @@ pub struct SemiSpace {
     pub(crate) mark_stack: Vec<*mut HeapObjectHeader>,
     weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
+    finalize_list: Vector<*mut HeapObjectHeader>,
+    finalize_lock: Lock,
 }
 
 pub fn instantiate_semispace(semispace_size: usize) -> MutatorRef<SemiSpace> {
@@ -48,6 +51,8 @@ pub fn instantiate_semispace(semispace_size: usize) -> MutatorRef<SemiSpace> {
         large_space: LargeObjectSpace::new(),
         mutators: Vec::new(),
         mark_stack: Vec::new(),
+        finalize_list: Vector::new(),
+        finalize_lock: Lock::INIT,
         constraints: vec![],
         from_space: BumpPointerSpace::new(semispace_size),
         to_space: BumpPointerSpace::new(semispace_size),
@@ -128,6 +133,15 @@ impl GcBase for SemiSpace {
         self.constraints.push(Box::new(constraint));
         self.global_unlock();
     }
+    fn post_alloc<T: Collectable + Sized + 'static>(&mut self, value: Gc<T, Self>) {
+        if std::mem::needs_drop::<T>() {
+            unsafe {
+                self.finalize_lock.lock();
+                self.finalize_list.push_front(value.base.as_ptr());
+                self.finalize_lock.unlock();
+            }
+        }
+    }
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -166,10 +180,13 @@ impl GcBase for SemiSpace {
             (*hdr).set_vtable(vtable_of::<T>());
             (*hdr).set_size(size);
             ((*hdr).data() as *mut T).write(value);
-            Gc {
+
+            let val = Gc {
                 base: NonNull::new_unchecked(hdr),
                 marker: Default::default(),
-            }
+            };
+            self.post_alloc(val);
+            val
         }
     }
     fn safepoint(&self) -> &GlobalSafepoint {
@@ -274,6 +291,14 @@ impl GcBase for SemiSpace {
                 unsafe {
                     self.after_mark_constraints();
                 }
+                self.finalize_list.retain(|x| unsafe {
+                    let object = *x;
+                    if (*object).is_forwarded() {
+                        return true;
+                    }
+                    (*object).get_dyn().finalize();
+                    false
+                });
                 self.weak_refs.retain_mut(|object| unsafe {
                     let header = object.base();
                     if (*header).is_forwarded() {

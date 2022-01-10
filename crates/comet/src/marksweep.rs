@@ -13,6 +13,7 @@ use crate::{
     utils::align_usize,
 };
 use atomic::Ordering;
+use im::Vector;
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 use rosalloc::{Rosalloc, NUM_OF_SLOTS};
 use std::ptr::null_mut;
@@ -40,6 +41,8 @@ pub struct MarkSweep {
     total_gcs: usize,
     weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
+    finalize_list: Vector<*mut HeapObjectHeader>,
+    finalize_lock: Lock,
 }
 fn max_bytes_bulk_allocated_for(size: usize) -> usize {
     if !Rosalloc::is_size_for_thread_local(size) {
@@ -140,6 +143,8 @@ impl MarkSweep {
         );
         let this = Self {
             total_gcs: 0,
+            finalize_list: Vector::new(),
+            finalize_lock: Lock::INIT,
             constraints: vec![],
             global_heap_lock: Lock::INIT,
             large_space_lock: Lock::INIT,
@@ -309,13 +314,28 @@ impl GcBase for MarkSweep {
                 }
                 self.after_mark_constraints();
                 let rosalloc = self.rosalloc;
-
                 let mark = &*(*rosalloc).get_mark_bitmap();
+                self.finalize_list.retain(|x| {
+                    let header = *x;
+                    if (mark.has_address(header.cast()) && mark.test(header.cast()))
+                        || ((*header).is_precise()
+                            && (*PreciseAllocation::from_cell(header)).is_marked())
+                    {
+                        true
+                    } else {
+                        (*header).get_dyn().finalize();
+                        false
+                    }
+                });
+
                 self.weak_refs.retain_mut(|object| {
                     let header = object.base();
                     if mark.test(header.cast()) {
                         object.after_mark(|header| {
-                            if mark.test(header.cast()) {
+                            if (mark.has_address(header.cast()) && mark.test(header.cast()))
+                                || ((*header).is_precise()
+                                    && (*PreciseAllocation::from_cell(header)).is_marked())
+                            {
                                 header
                             } else {
                                 null_mut()
@@ -389,7 +409,7 @@ impl GcBase for MarkSweep {
         _space: AllocationSpace,
     ) -> Gc<T, Self> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
-        if Rosalloc::is_size_for_thread_local(size) {
+        let val = if Rosalloc::is_size_for_thread_local(size) {
             let obj = unsafe { mutator.allocate_from_tlab(value) };
             match obj {
                 Ok(value) => {
@@ -403,6 +423,19 @@ impl GcBase for MarkSweep {
             }
         } else {
             self.alloc_once::<T, false, true>(mutator, value)
+        };
+
+        self.post_alloc(val);
+        val
+    }
+
+    fn post_alloc<T: Collectable + Sized + 'static>(&mut self, value: Gc<T, Self>) {
+        if std::mem::needs_drop::<T>() {
+            unsafe {
+                self.finalize_lock.lock();
+                self.finalize_list.push_back(value.base.as_ptr());
+                self.finalize_lock.unlock();
+            }
         }
     }
     fn alloc_tlab_area(&mut self, _mutator: &MutatorRef<Self>, _size: usize) -> *mut u8 {

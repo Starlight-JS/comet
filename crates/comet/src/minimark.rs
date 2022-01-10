@@ -44,6 +44,7 @@ use crate::{
 use atomic::Atomic;
 //use atomic::Atomic;
 use atomic::Ordering;
+use im::Vector;
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 use rosalloc::dedicated_full_run;
 use rosalloc::Rosalloc;
@@ -54,6 +55,7 @@ use rosalloc::defs::NUM_THREAD_LOCAL_SIZE_BRACKETS;
 //use rosalloc::Run;
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
+use std::mem;
 use std::mem::size_of;
 use std::ptr::{null_mut, NonNull};
 use std::sync::Arc;
@@ -113,6 +115,9 @@ pub struct MiniMark {
     growth_limit: usize,
     weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
+    finalize_list: Vector<*mut HeapObjectHeader>,
+    finalize_lock: Lock,
+    finalize_list_old: Vector<*mut HeapObjectHeader>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -197,6 +202,9 @@ impl MiniMark {
         );
 
         let mut this = Self {
+            finalize_list: Vector::new(),
+            finalize_list_old: Vector::new(),
+            finalize_lock: Lock::INIT,
             growth_limit,
             constraints: vec![],
             alloc_color: GC_WHITE,
@@ -538,6 +546,19 @@ impl MiniMark {
         self.minor_marking_phase(mutator, keep);
         let nursery_start = self.nursery.start();
         let nursery_end = self.nursery.end();
+
+        let mut finalize_list_old = mem::replace(&mut self.finalize_list_old, Vector::new());
+        self.finalize_list.retain(|x| {
+            let object = *x;
+            if (*object).is_forwarded() {
+                finalize_list_old.push_back((*object).vtable() as _);
+            } else if (*PreciseAllocation::from_cell(object)).is_marked() {
+                finalize_list_old.push_back(object);
+            }
+            (*object).get_dyn().finalize();
+            false
+        });
+
         let is_young = |ptr: *mut HeapObjectHeader| {
             (ptr.cast::<u8>() >= nursery_start && ptr.cast::<u8>() < nursery_end)
                 || (*ptr).is_precise() && !(*PreciseAllocation::from_cell(ptr)).is_marked()
@@ -698,7 +719,7 @@ impl MiniMark {
         _space: AllocationSpace,
     ) -> Gc<T, Self> {
         let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
-        if Rosalloc::is_size_for_thread_local(size) {
+        let val = if Rosalloc::is_size_for_thread_local(size) {
             let (idx, _bracket_size) = Rosalloc::size_to_index_and_bracket_size(size);
             unsafe {
                 let thread_local_run = &mut *mutator.tlab.runs[idx];
@@ -725,7 +746,9 @@ impl MiniMark {
             }
         } else {
             self.alloc_once::<T, false, true>(mutator, value)
-        }
+        };
+        self.post_alloc(val);
+        val
     }
 
     #[inline]
@@ -753,10 +776,12 @@ impl MiniMark {
             (*hdr).set_size(size);
 
             ((*hdr).data() as *mut T).write(value);
-            Gc {
+            let val = Gc {
                 base: NonNull::new_unchecked(hdr),
                 marker: Default::default(),
-            }
+            };
+            self.post_alloc(val);
+            val
         }
     }
     #[cold]
@@ -1028,11 +1053,21 @@ impl GcBase for MiniMark {
         }
     }
     #[inline(always)]
-    fn post_alloc<T: crate::api::Collectable + Sized + 'static>(&mut self, _value: Gc<T, Self>) {
-        /*unsafe {
-            let hdr = value.base.as_ptr();
-            (*hdr).force_set_color(GC_WHITE);
-        }*/
+    fn post_alloc<T: crate::api::Collectable + Sized + 'static>(&mut self, value: Gc<T, Self>) {
+        if std::mem::needs_drop::<T>() {
+            unsafe {
+                self.finalize_lock.lock();
+                if self.nursery.contains(value.base.as_ptr().cast())
+                    || !(*PreciseAllocation::from_cell(value.base.as_ptr())).is_marked()
+                {
+                    self.finalize_list.push_front(value.base.as_ptr());
+                } else {
+                    self.finalize_list_old.push_front(value.base.as_ptr());
+                }
+
+                self.finalize_lock.unlock();
+            }
+        }
     }
     fn alloc_tlab_area(&mut self, _mutator: &MutatorRef<Self>, _size: usize) -> *mut u8 {
         self.nursery.bump_alloc(32 * 1024)
