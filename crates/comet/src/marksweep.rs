@@ -1,6 +1,8 @@
 use crate::api::Weak;
 use crate::bitmap::SpaceBitmap;
-use crate::gc_base::{AllocationSpace, MarkingConstraint, MarkingConstraintRuns, NoReadBarrier};
+use crate::gc_base::{
+    AllocationSpace, MarkingConstraint, MarkingConstraintRuns, NoHelp, NoReadBarrier,
+};
 use crate::rosalloc_space::{RosAllocSpace, RosAllocTLAB};
 use crate::utils::formatted_size;
 use crate::{
@@ -264,6 +266,11 @@ impl GcBase for MarkSweep {
     type TLAB = RosAllocTLAB;
     const SUPPORTS_TLAB: bool = false;
     type ReadBarrier = NoReadBarrier;
+
+    fn inline_allocation_helpers(&self) -> Self::InlineAllocationHelpers {
+        NoHelp
+    }
+
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T) {
         self.global_lock();
         self.constraints.push(Box::new(constraint));

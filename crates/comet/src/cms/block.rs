@@ -1,9 +1,10 @@
-use std::ptr::null_mut;
+use std::{mem::size_of, ptr::null_mut};
 
 use crate::api::HeapObjectHeader;
 
 pub const BLOCK_SIZE: usize = 16 * 1024;
 pub const ATOM_SIZE: usize = 16;
+pub const BLOCK_PAYLOAD: usize = BLOCK_SIZE - size_of::<Block>();
 
 pub struct FreeList {
     head: *mut HeapObjectHeader,

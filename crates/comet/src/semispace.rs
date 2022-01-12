@@ -15,12 +15,14 @@ use std::{
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak},
     bump_pointer_space::BumpPointerSpace,
-    gc_base::{AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoReadBarrier},
+    gc_base::{
+        AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoHelp, NoReadBarrier,
+    },
     large_space::{LargeObjectSpace, PreciseAllocation},
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
     small_type_id,
-    tlab::SimpleTLAB,
+    tlab::{InlineAllocationHelpersForSimpleTLAB, SimpleTLAB},
     utils::align_usize,
 };
 
@@ -128,6 +130,10 @@ impl GcBase for SemiSpace {
     const SUPPORTS_TLAB: bool = true;
     type TLAB = SimpleTLAB<Self>;
     type ReadBarrier = NoReadBarrier;
+    type InlineAllocationHelpers = InlineAllocationHelpersForSimpleTLAB;
+    fn inline_allocation_helpers(&self) -> Self::InlineAllocationHelpers {
+        InlineAllocationHelpersForSimpleTLAB
+    }
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T) {
         self.global_lock();
         self.constraints.push(Box::new(constraint));

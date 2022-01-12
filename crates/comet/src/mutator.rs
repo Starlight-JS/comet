@@ -40,6 +40,7 @@ impl ThreadState {
 /// - TLAB for thread local allocations
 /// - heap itself when TLAB allocation fails
 /// - join data so other mutators can wait on this one
+#[repr(C)]
 pub struct Mutator<H: GcBase + 'static> {
     pub(crate) tlab: H::TLAB,
 
@@ -55,6 +56,14 @@ pub struct Mutator<H: GcBase + 'static> {
 }
 
 impl<H: 'static + GcBase> Mutator<H> {
+    pub unsafe fn tlab(&self) -> &H::TLAB {
+        &self.tlab
+    }
+
+    pub unsafe fn tlab_mut(&mut self) -> &mut H::TLAB {
+        &mut self.tlab
+    }
+
     pub fn add_constraint<T: MarkingConstraint + 'static>(&self, c: T) {
         self.heap_ref().add_constraint(c);
     }
@@ -394,6 +403,10 @@ impl<H: GcBase + 'static> MutatorRef<H> {
         Self {
             mutator: unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(mutator))) },
         }
+    }
+
+    pub unsafe fn ptr(&self) -> *mut Mutator<H> {
+        self.mutator.as_ptr()
     }
 }
 

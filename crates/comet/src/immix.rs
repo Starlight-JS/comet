@@ -11,7 +11,9 @@
 
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak, GC_BLACK, GC_WHITE},
-    gc_base::{AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoReadBarrier},
+    gc_base::{
+        AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoHelp, NoReadBarrier,
+    },
     large_space::{LargeObjectSpace, PreciseAllocation},
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
@@ -395,6 +397,11 @@ impl GcBase for Immix {
     const SUPPORTS_TLAB: bool = false;
     type ReadBarrier = NoReadBarrier;
     const LARGE_ALLOCATION_SIZE: usize = IMMIX_BLOCK_SIZE / 2;
+
+    fn inline_allocation_helpers(&self) -> Self::InlineAllocationHelpers {
+        NoHelp
+    }
+
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T) {
         self.global_lock();
         self.constraints.push(Box::new(constraint));

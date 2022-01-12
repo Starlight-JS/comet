@@ -26,6 +26,7 @@ use crate::gc_base::AllocationSpace;
 use crate::gc_base::GcBase;
 use crate::gc_base::MarkingConstraint;
 use crate::gc_base::MarkingConstraintRuns;
+use crate::gc_base::NoHelp;
 use crate::gc_base::NoReadBarrier;
 use crate::gc_base::TLAB;
 use crate::large_space::LargeObjectSpace;
@@ -924,6 +925,11 @@ impl GcBase for MiniMark {
     const SUPPORTS_TLAB: bool = true;
     type ReadBarrier = NoReadBarrier;
     const LARGE_ALLOCATION_SIZE: usize = 16 * 1024;
+
+    fn inline_allocation_helpers(&self) -> Self::InlineAllocationHelpers {
+        NoHelp
+    }
+
     fn add_constraint<T: crate::gc_base::MarkingConstraint + 'static>(&mut self, constraint: T) {
         self.global_lock();
         self.constraints.push(Box::new(constraint));

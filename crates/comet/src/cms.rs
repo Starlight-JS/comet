@@ -49,4 +49,12 @@
 pub mod block;
 pub mod marker;
 pub mod marking_worklist;
+pub mod space;
 pub mod write_barrier;
+
+/// Concurrent Mark&Sweep heap.
+///
+///
+///
+/// `CONCURRENT` const determines if GC does concurrent marking&sweeping or always performs collection in STW, useful for debugging.
+pub struct ConcurrentMarkSweep<const CONCURRENT: bool = true> {}

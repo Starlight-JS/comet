@@ -21,7 +21,13 @@
 //! - [Semispace](semispace)
 //! - [Shenandoah](shenandoah) (NOTE: Very W.I.P & TBD)
 
-#![feature(new_uninit, const_type_id, vec_retain_mut, thread_local)]
+#![feature(
+    new_uninit,
+    const_type_id,
+    vec_retain_mut,
+    thread_local,
+    associated_type_defaults
+)]
 #[macro_use]
 pub mod shadow_stack;
 #[macro_use]
@@ -29,6 +35,7 @@ pub mod utils;
 #[macro_use]
 pub mod alloc;
 pub mod api;
+#[macro_use]
 pub mod bitmap;
 pub mod bump_pointer_space;
 pub mod card_table;

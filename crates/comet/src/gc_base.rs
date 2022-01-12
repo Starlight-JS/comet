@@ -20,6 +20,8 @@ pub enum AllocationSpace {
     Large,
 }
 
+pub struct NoHelp;
+
 /// Base trait for all GCs.
 pub trait GcBase: Sized + 'static {
     /// Default large object size. If allocation request exceeds this constant [GcBase::allocate_large] is invoked.
@@ -28,7 +30,10 @@ pub trait GcBase: Sized + 'static {
     const SUPPORTS_TLAB: bool = false;
     type ReadBarrier: ReadBarrier<Self>;
     type TLAB: TLAB<Self>;
+    type TRAIT: Collectable + ?Sized = dyn Collectable;
+    type InlineAllocationHelpers = NoHelp;
 
+    fn inline_allocation_helpers(&self) -> Self::InlineAllocationHelpers;
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T);
 
     /// Allocates weak reference on GC heap

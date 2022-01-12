@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    api::{vtable_of, Gc, HeapObjectHeader},
+    api::{vtable_of, Collectable, Gc, HeapObjectHeader},
     gc_base::{GcBase, TLAB},
     mutator::MutatorRef,
     small_type_id,
@@ -90,5 +90,84 @@ impl<H: GcBase<TLAB = Self>> TLAB<H> for SimpleTLAB<H> {
             tlab_cursor: null_mut(),
             tlab_end: null_mut(),
         }
+    }
+}
+
+/// Inline allocation helpers for [SimpleTLAB](SimpleTLAB). These helpers are the easiest one to use: simply load fields from offsets provided
+/// by these helpers and bump allocate into TLAB.
+///
+/// ## Example
+/// **NOTE**: Pseudocode
+///
+/// ```rust
+/// fn emit_alloc_object<H: GcBase<TLAB=SimpleTLAB<H>>(&mut self,size: usize,mutator: &MutatorRef<H>) {
+///     let helpers = mutator.inline_helpers();
+///     let cursor_offset = helpers.tlab_cursor_offset(mutator);
+///     let end_offset = helpers.tlab_end_offset(mutator);
+///     
+///     self.load_offset(MUTATOR_REG, cursor_offset, TMP1);
+///     self.load_offset(MUTATOR_REG, end_offset, TMP2);
+///     self.iadd(TMP3, TMP1, size + size_of::<HeapObjectHeader>()); // new cursor
+///     self.branch_if_greater_than(TMP3,TMP2, <slowpath>); // if new cursor > TLAB end then jump to slowpath, slowpath might just be call to runtime function which does allocation.
+///     self.store_offset(MUTATOR_REG, cursor_offset, TMP3); // update TLAB cursor
+///     self.store_offset(TMP1, 0, helpers.alloc_heap_object_header_for::<Object>()) // store heap object header at 0 offset. Memory that is usable is at TMP1 + size_of::<HeapObjectHeader>()
+///     // done! Memory is now allocated in TMP1 register, usable memory starts from TMP1 + size_of::<HeapObjectHeader>()
+/// }
+///
+/// ```
+///
+pub struct InlineAllocationHelpersForSimpleTLAB;
+
+impl InlineAllocationHelpersForSimpleTLAB {
+    pub fn tlab_end_offset<Heap: GcBase<TLAB = SimpleTLAB<Heap>>>(
+        &self,
+        mutator: &MutatorRef<Heap>,
+    ) -> usize {
+        unsafe {
+            let start = mutator.ptr() as usize;
+            let end = &mutator.tlab().tlab_end as *const _ as usize;
+            end - start
+        }
+    }
+
+    pub fn tlab_start_offset<Heap: GcBase<TLAB = SimpleTLAB<Heap>>>(
+        &self,
+        mutator: &MutatorRef<Heap>,
+    ) -> usize {
+        unsafe {
+            let start = mutator.ptr() as usize;
+            let end = &mutator.tlab().tlab_start as *const _ as usize;
+            end - start
+        }
+    }
+
+    pub fn tlab_cursor_offset<Heap: GcBase<TLAB = SimpleTLAB<Heap>>>(
+        &self,
+        mutator: &MutatorRef<Heap>,
+    ) -> usize {
+        unsafe {
+            let start = mutator.ptr() as usize;
+            let end = &mutator.tlab().tlab_cursor as *const _ as usize;
+            end - start
+        }
+    }
+
+    pub fn alloc_heap_object_header_for<T: Collectable + 'static>(
+        &self,
+        size: usize,
+    ) -> HeapObjectHeader {
+        let mut hdr = HeapObjectHeader {
+            value: 0,
+            type_id: 0,
+            padding: 0,
+            padding2: 0,
+        };
+        hdr.set_vtable(vtable_of::<T>());
+        assert!(
+            size <= 64 * 1024,
+            "allocation size too large to be inlineable"
+        );
+        hdr.set_size(size);
+        hdr
     }
 }
