@@ -168,6 +168,7 @@ impl InlineAllocationHelpersForSimpleTLAB {
             "allocation size too large to be inlineable"
         );
         hdr.set_size(size);
+        hdr.type_id = small_type_id::<T>();
         hdr
     }
 }
