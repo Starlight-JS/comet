@@ -4,7 +4,7 @@ use std::{
     marker::PhantomData,
     mem::{size_of, MaybeUninit},
     ops::{Deref, DerefMut, Range},
-    ptr::{null_mut, NonNull},
+    ptr::{null_mut, DynMetadata, NonNull},
     sync::atomic::AtomicU16,
 };
 
@@ -97,13 +97,20 @@ pub const GC_GREY: u8 = 2;
 #[derive(Clone, Copy)]
 pub struct HeapObjectHeader {
     /// First 64 bit word of header. It stores object vtable that contains [Trace::trace] and [Finalize::finalize] methods.
-    pub value: u64,
+    pub value: VTable,
     /// Metadata stored there depends strictly on GC type
     pub padding: u16,
     /// Metadata stored there depends strictly on GC type
     pub padding2: u16,
     /// TypeId of allocated type that is again hashed by 32 bit hasher so object header is 2 words on 64 bit platforms.
     pub type_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union VTable {
+    pub raw: u64,
+    pub metadata: DynMetadata<dyn Collectable>,
 }
 
 /// Minimal allocation size in GC heap.
@@ -120,16 +127,11 @@ impl HeapObjectHeader {
     }
     #[inline(always)]
     pub fn get_dyn(&mut self) -> &mut dyn Collectable {
-        unsafe {
-            std::mem::transmute::<_, _>(mopa::TraitObject {
-                data: self.data() as *mut (),
-                vtable: self.vtable() as _,
-            })
-        }
+        unsafe { &mut *std::ptr::from_raw_parts_mut(self.data() as *mut (), self.value.metadata) }
     }
     #[inline(always)]
     pub fn set_forwarded(&mut self, fwdptr: usize) {
-        self.value = VTableBitField::encode(fwdptr as _);
+        self.value.raw = fwdptr as _;
         self.padding = ForwardedBit::encode(1) as _;
     }
     #[inline(always)]
@@ -157,11 +159,16 @@ impl HeapObjectHeader {
     }
     #[inline(always)]
     pub fn vtable(&self) -> usize {
-        VTableBitField::decode(self.value) as _
+        unsafe { self.value.raw as _ }
     }
     #[inline(always)]
     pub fn set_vtable(&mut self, vtable: usize) {
-        self.value = VTableBitField::encode(vtable as _);
+        self.value.raw = vtable as _;
+    }
+
+    #[inline(always)]
+    pub fn set_metadata(&mut self, metadata: DynMetadata<dyn Collectable>) {
+        self.value.metadata = metadata;
     }
     #[inline(always)]
     pub fn is_allocated(&self) -> bool {
@@ -238,16 +245,12 @@ impl HeapObjectHeader {
 
 unsafe impl<T: Collectable + ?Sized, H: GcBase> Finalize for Gc<T, H> {}
 impl<T: Collectable + ?Sized, H: GcBase> Collectable for Gc<T, H> {}
-pub(crate) fn vtable_of<T: Collectable>() -> usize {
+pub(crate) fn vtable_of<T: Collectable>() -> DynMetadata<dyn Collectable> {
     let x = null_mut::<T>();
-    unsafe { std::mem::transmute::<_, mopa::TraitObject>(x as *mut dyn Collectable).vtable as _ }
+    // use ptr::metadata to get DynMetadata<dyn Collectable>
+    std::ptr::metadata(x as *mut dyn Collectable)
 }
 
-#[allow(dead_code)]
-pub(crate) fn vtable_of_trace<T: Trace>() -> usize {
-    let x = null_mut::<T>();
-    unsafe { std::mem::transmute::<_, mopa::TraitObject>(x as *mut dyn Trace).vtable as _ }
-}
 /// A garbage collected pointer to a value.
 ///
 /// This is the equivalent of a garbage collected smart-pointer.
@@ -283,6 +286,7 @@ impl<T: Collectable + ?Sized, H: GcBase> Gc<T, H> {
     pub fn is<U: Collectable>(&self) -> bool {
         unsafe { (*self.base.as_ptr()).type_id == small_type_id::<U>() }
     }
+
     /// Get type vtable
     #[inline]
     pub fn vtable(&self) -> usize {
@@ -633,5 +637,16 @@ unsafe impl<T: Trace> Trace for Range<T> {
     fn trace(&mut self, vis: &mut dyn Visitor) {
         self.start.trace(vis);
         self.end.trace(vis);
+    }
+}
+
+unsafe impl<T: Trace> Trace for &[T] {
+    fn trace(&mut self, visitor: &mut dyn Visitor) {
+        for item in self.iter() {
+            unsafe {
+                let item = std::mem::transmute_copy::<_, &mut T>(item);
+                item.trace(visitor);
+            }
+        }
     }
 }

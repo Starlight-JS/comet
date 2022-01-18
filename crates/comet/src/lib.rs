@@ -26,7 +26,9 @@
     const_type_id,
     vec_retain_mut,
     thread_local,
-    associated_type_defaults
+    associated_type_defaults,
+    type_name_of_val,
+    ptr_metadata
 )]
 #[macro_use]
 pub mod shadow_stack;
@@ -109,4 +111,20 @@ pub(crate) const fn small_type_id<T: 'static>() -> u32 {
         let bytes: [u8; std::mem::size_of::<TypeId>()] = std::mem::transmute(TypeId::of::<T>());
         fnv1a_hash_32(&bytes, None)
     }
+}
+
+/// Like C's offsetof but you can use it with GC-able objects to get offset from GC header to field.
+///
+/// The magic number 0x4000 is insignificant. We use it to avoid using NULL, since
+/// NULL can cause compiler problems, especially in cases of multiple inheritance
+#[macro_export]
+macro_rules! gc_offsetof {
+    ($name : ident. $($field: ident).*) => {
+        unsafe {
+            let uninit = std::mem::transmute::<_,$crate::api::Gc<$name,$crate::marksweep::MarkSweep>>(0x4000usize);
+            let fref = &uninit.$($field).*;
+            let faddr = fref as *const _ as usize;
+            faddr - 0x4000
+        }
+    };
 }

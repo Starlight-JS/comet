@@ -250,7 +250,7 @@ impl MarkSweep {
             }
 
             let header = mem.cast::<HeapObjectHeader>();
-            (*header).set_vtable(vtable_of::<T>());
+            (*header).set_metadata(vtable_of::<T>());
             (*header).set_size(size);
             ((*header).data() as *mut T).write(value);
             (*self.live_bitmap).set(header.cast());
@@ -505,7 +505,7 @@ impl GcBase for MarkSweep {
             let size = value.allocation_size() + size_of::<HeapObjectHeader>();
             self.large_space_lock.lock();
             let object = self.large_space.allocate(size);
-            (*object).set_vtable(vtable_of::<T>());
+            (*object).set_metadata(vtable_of::<T>());
             (*object).type_id = small_type_id::<T>();
             let gc = Gc {
                 base: NonNull::new_unchecked(object),

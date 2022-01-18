@@ -435,7 +435,7 @@ impl GcBase for Immix {
                 return self.collect_and_alloc(mutator, value);
             }
             let object = memory.cast::<HeapObjectHeader>();
-            (*object).set_vtable(vtable_of::<T>());
+            (*object).set_metadata(vtable_of::<T>());
             (*object).type_id = small_type_id::<T>();
             (*object).set_size(size);
             ((*object).data() as *mut T).write(value);
@@ -602,7 +602,7 @@ impl GcBase for Immix {
             let size = value.allocation_size() + size_of::<HeapObjectHeader>();
             self.large_space_lock.lock();
             let object = self.large_space.allocate(size);
-            (*object).set_vtable(vtable_of::<T>());
+            (*object).set_metadata(vtable_of::<T>());
             (*object).type_id = small_type_id::<T>();
             let gc = Gc {
                 base: NonNull::new_unchecked(object),

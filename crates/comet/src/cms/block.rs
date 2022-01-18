@@ -19,7 +19,7 @@ impl FreeList {
         unsafe {
             let entry = entry.cast::<HeapObjectHeader>();
             (*entry).set_free();
-            (*entry).value = self.head as u64;
+            (*entry).value.raw = self.head as u64;
             self.head = entry;
         }
     }
@@ -27,7 +27,7 @@ impl FreeList {
     pub fn take(&mut self) -> *mut HeapObjectHeader {
         unsafe {
             let prev = self.head;
-            self.head = (*prev).value as *mut HeapObjectHeader;
+            self.head = (*prev).value.raw as *mut HeapObjectHeader;
             prev
         }
     }

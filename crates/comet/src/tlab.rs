@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    api::{vtable_of, Collectable, Gc, HeapObjectHeader},
+    api::{vtable_of, Collectable, Gc, HeapObjectHeader, VTable},
     gc_base::{GcBase, TLAB},
     mutator::MutatorRef,
     small_type_id,
@@ -49,9 +49,9 @@ impl<H: GcBase<TLAB = Self>> TLAB<H> for SimpleTLAB<H> {
                 type_id: small_type_id::<T>(),
                 padding: 0,
                 padding2: 0,
-                value: 0,
+                value: VTable { raw: 0 },
             });
-            (*header).set_vtable(vtable_of::<T>());
+            (*header).set_metadata(vtable_of::<T>());
             (*header).set_size(size);
             ((*header).data() as *mut T).write(value);
             let h = &mut *self.heap.get();
@@ -157,12 +157,12 @@ impl InlineAllocationHelpersForSimpleTLAB {
         size: usize,
     ) -> HeapObjectHeader {
         let mut hdr = HeapObjectHeader {
-            value: 0,
+            value: VTable { raw: 0 },
             type_id: 0,
             padding: 0,
             padding2: 0,
         };
-        hdr.set_vtable(vtable_of::<T>());
+        hdr.set_metadata(vtable_of::<T>());
         assert!(
             size <= 64 * 1024,
             "allocation size too large to be inlineable"

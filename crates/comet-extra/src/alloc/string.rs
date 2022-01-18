@@ -397,6 +397,7 @@ impl Str {
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), this.data_start.as_mut_ptr(), src.len());
         }
+
         this
     }
 

@@ -18,6 +18,7 @@
 use crate::api::vtable_of;
 use crate::api::Collectable;
 use crate::api::Gc;
+use crate::api::VTable;
 use crate::api::Weak;
 use crate::api::GC_BLACK;
 use crate::api::GC_GREY;
@@ -735,9 +736,9 @@ impl MiniMark {
                     type_id: small_type_id::<T>(),
                     padding: 0,
                     padding2: 0,
-                    value: 0,
+                    value: VTable { raw: 0 },
                 });
-                (*header).set_vtable(vtable_of::<T>());
+                (*header).set_metadata(vtable_of::<T>());
                 (*header).set_size(size);
                 ((*header).data() as *mut T).write(value);
                 Gc {
@@ -773,7 +774,7 @@ impl MiniMark {
 
         unsafe {
             let hdr = memory.cast::<HeapObjectHeader>();
-            (*hdr).set_vtable(vtable_of::<T>());
+            (*hdr).set_metadata(vtable_of::<T>());
             (*hdr).set_size(size);
 
             ((*hdr).data() as *mut T).write(value);
@@ -841,7 +842,7 @@ impl MiniMark {
             }
 
             let header = mem.cast::<HeapObjectHeader>();
-            (*header).set_vtable(vtable_of::<T>());
+            (*header).set_metadata(vtable_of::<T>());
             (*header).set_size(size);
             ((*header).data() as *mut T).write(value);
 
@@ -1133,7 +1134,7 @@ impl GcBase for MiniMark {
             let size = value.allocation_size() + size_of::<HeapObjectHeader>();
             self.large_space_lock.lock();
             let object = self.large_space.allocate(size);
-            (*object).set_vtable(vtable_of::<T>());
+            (*object).set_metadata(vtable_of::<T>());
             (*object).type_id = small_type_id::<T>();
             let gc = Gc {
                 base: NonNull::new_unchecked(object),
@@ -1182,9 +1183,9 @@ impl TLAB<MiniMark> for MiniMarkTLAB {
                 type_id: small_type_id::<T>(),
                 padding: 0,
                 padding2: 0,
-                value: 0,
+                value: VTable { raw: 0 },
             });
-            (*header).set_vtable(vtable_of::<T>());
+            (*header).set_metadata(vtable_of::<T>());
             (*header).set_size(size);
             ((*header).data() as *mut T).write(value);
             let h = &mut *self.heap.get();

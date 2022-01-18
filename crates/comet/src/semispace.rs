@@ -181,7 +181,7 @@ impl GcBase for SemiSpace {
 
         unsafe {
             let hdr = memory.cast::<HeapObjectHeader>();
-            (*hdr).set_vtable(vtable_of::<T>());
+            (*hdr).set_metadata(vtable_of::<T>());
             (*hdr).set_size(size);
             ((*hdr).data() as *mut T).write(value);
 
@@ -249,7 +249,7 @@ impl GcBase for SemiSpace {
             let size = value.allocation_size() + size_of::<HeapObjectHeader>();
             self.large_space_lock.lock();
             let object = self.large_space.allocate(size);
-            (*object).set_vtable(vtable_of::<T>());
+            (*object).set_metadata(vtable_of::<T>());
             (*object).type_id = small_type_id::<T>();
             let gc = Gc {
                 base: NonNull::new_unchecked(object),

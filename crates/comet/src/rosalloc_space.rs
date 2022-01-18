@@ -12,7 +12,7 @@ use rosalloc::{
 };
 
 use crate::{
-    api::{vtable_of, Gc, HeapObjectHeader},
+    api::{vtable_of, Gc, HeapObjectHeader, VTable},
     gc_base::{GcBase, TLAB},
     mutator::MutatorRef,
     small_type_id,
@@ -269,9 +269,9 @@ impl<H: GcBase<TLAB = Self>> TLAB<H> for RosAllocTLAB {
                 type_id: small_type_id::<T>(),
                 padding: 0,
                 padding2: 0,
-                value: 0,
+                value: VTable { raw: 0 },
             });
-            (*header).set_vtable(vtable_of::<T>());
+            (*header).set_metadata(vtable_of::<T>());
             (*header).set_size(size);
             ((*header).data() as *mut T).write(value);
             Ok(Gc {
