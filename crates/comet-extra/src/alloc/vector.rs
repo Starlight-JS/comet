@@ -727,6 +727,10 @@ unsafe impl<T: Trace, H: GcBase> Trace for Vector<T, H> {
     }
 }
 
+unsafe impl<T: Trace, H: GcBase> Finalize for Vector<T, H> {}
+
+impl<T: Trace, H: GcBase> Collectable for Vector<T, H> {}
+
 #[repr(C)]
 struct VectorStorage<T: Trace + 'static> {
     length: AtomicU32,
