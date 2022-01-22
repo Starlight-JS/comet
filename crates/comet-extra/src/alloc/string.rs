@@ -58,6 +58,7 @@ pub struct FromUtf8Error<H: GcBase> {
 pub struct FromUtf16Error(());
 
 /// GCed version of [alloc::string::String] It has all the same features as std String.
+#[derive(Clone)]
 pub struct String<H: GcBase> {
     vec: Vector<u8, H>,
 }
