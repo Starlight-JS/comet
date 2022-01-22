@@ -252,6 +252,7 @@ impl MarkSweep {
             let header = mem.cast::<HeapObjectHeader>();
             (*header).set_metadata(vtable_of::<T>());
             (*header).set_size(size);
+            (*header).type_id = small_type_id::<T>();
             ((*header).data() as *mut T).write(value);
             (*self.live_bitmap).set(header.cast());
             Gc {

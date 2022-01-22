@@ -113,6 +113,14 @@ pub(crate) const fn small_type_id<T: 'static>() -> u32 {
     }
 }
 
+#[inline(always)]
+pub(crate) const fn make_small_type_id(id: TypeId) -> u32 {
+    unsafe {
+        let bytes: [u8; std::mem::size_of::<TypeId>()] = std::mem::transmute(id);
+        fnv1a_hash_32(&bytes, None)
+    }
+}
+
 /// Like C's offsetof but you can use it with GC-able objects to get offset from GC header to field.
 ///
 /// The magic number 0x4000 is insignificant. We use it to avoid using NULL, since

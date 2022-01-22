@@ -1,4 +1,5 @@
 use std::{
+    any::TypeId,
     cell::UnsafeCell,
     marker::PhantomData,
     ptr::{null_mut, NonNull},
@@ -6,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    api::{Collectable, Gc, Trace, Visitor, Weak},
+    api::{Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak},
     mutator::{Mutator, MutatorRef},
     rosalloc_space::RosAllocSpace,
     safepoint::GlobalSafepoint,
@@ -36,6 +37,20 @@ pub trait GcBase: Sized + 'static {
     fn inline_allocation_helpers(&self) -> Self::InlineAllocationHelpers;
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T);
 
+    /// Allocates `size` bytes on heap and creates object header with `type_id` and `vtable`. This function can be used to allocate dyn sized arrays or strings.
+    fn allocate_raw(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        size: usize,
+        type_id: TypeId,
+        vtable: usize,
+    ) -> *mut HeapObjectHeader {
+        let _ = mutator;
+        let _ = size;
+        let _ = type_id;
+        let _ = vtable;
+        todo!()
+    }
     /// Allocates weak reference on GC heap
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,

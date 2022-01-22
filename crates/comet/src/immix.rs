@@ -15,6 +15,7 @@ use crate::{
         AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoHelp, NoReadBarrier,
     },
     large_space::{LargeObjectSpace, PreciseAllocation},
+    make_small_type_id,
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
     small_type_id,
@@ -28,7 +29,9 @@ use crate::{
 use atomic::Ordering;
 use im::Vector;
 use rosalloc::defs::PAGE_SIZE;
-use std::{cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc};
+use std::{
+    any::TypeId, cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc,
+};
 use std::{
     ptr::null_mut,
     sync::atomic::{AtomicPtr, AtomicUsize},
@@ -390,6 +393,23 @@ impl Immix {
         mutator.tlab.emergency_collection = false;
         value
     }
+
+    #[cold]
+    unsafe fn collect_and_alloc_raw(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+
+        size: usize,
+        vtable: usize,
+        type_id: TypeId,
+    ) -> *mut HeapObjectHeader {
+        self.collect_alloc_failure(mutator, &mut []);
+
+        mutator.tlab.emergency_collection = true;
+        let value = self.allocate_raw(mutator, size, type_id, vtable);
+        mutator.tlab.emergency_collection = false;
+        value
+    }
 }
 
 impl GcBase for Immix {
@@ -406,6 +426,39 @@ impl GcBase for Immix {
         self.global_lock();
         self.constraints.push(Box::new(constraint));
         self.global_unlock();
+    }
+
+    fn allocate_raw(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        size: usize,
+        type_id: std::any::TypeId,
+        vtable: usize,
+    ) -> *mut HeapObjectHeader {
+        let alloc = &mut mutator.tlab;
+        let size = align_usize(size + size_of::<HeapObjectHeader>(), 8);
+        unsafe {
+            let memory = if size >= Self::LARGE_ALLOCATION_SIZE {
+                alloc.alloc(size)
+            } else {
+                self.large_space.allocate(size).cast::<u8>()
+            };
+
+            if memory.is_null() {
+                return self.collect_and_alloc_raw(mutator, size, vtable, type_id);
+            }
+            let object = memory.cast::<HeapObjectHeader>();
+            (*object).set_vtable(vtable);
+            (*object).type_id = make_small_type_id(type_id);
+            (*object).set_size(size);
+
+            let gced: Gc<(), Self> = Gc {
+                base: NonNull::new_unchecked(object),
+                marker: Default::default(),
+            };
+            self.post_alloc(gced);
+            object
+        }
     }
     fn allocate_weak<T: Collectable + ?Sized>(
         &mut self,

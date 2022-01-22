@@ -17,6 +17,7 @@ use crate::{
     bump_pointer_space::BumpPointerSpace,
     gc_base::{AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoReadBarrier},
     large_space::{LargeObjectSpace, PreciseAllocation},
+    make_small_type_id,
     mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
     small_type_id,
@@ -163,6 +164,38 @@ impl GcBase for SemiSpace {
         let memory = self.to_space.bump_alloc(32 * 1024);
         memory
     }
+    #[inline]
+    fn allocate_raw(
+        &mut self,
+        mutator: &mut MutatorRef<Self>,
+        size: usize,
+        type_id: std::any::TypeId,
+        vtable: usize,
+    ) -> *mut HeapObjectHeader {
+        let size = align_usize(size + size_of::<HeapObjectHeader>(), 8);
+        let mut memory = self.to_space.bump_alloc(size);
+        if memory.is_null() {
+            self.collect(mutator, &mut []);
+            memory = self.to_space.bump_alloc(size);
+            if memory.is_null() {
+                oom_abort();
+            }
+        }
+
+        unsafe {
+            let hdr = memory.cast::<HeapObjectHeader>();
+            (*hdr).set_vtable(vtable);
+            (*hdr).set_size(size);
+            (*hdr).type_id = make_small_type_id(type_id);
+            let val: Gc<(), Self> = Gc {
+                base: NonNull::new_unchecked(hdr),
+                marker: Default::default(),
+            };
+            self.post_alloc(val);
+            hdr
+        }
+    }
+    #[inline]
     fn alloc_inline<T: crate::api::Collectable + Sized + 'static>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -183,6 +216,7 @@ impl GcBase for SemiSpace {
             let hdr = memory.cast::<HeapObjectHeader>();
             (*hdr).set_metadata(vtable_of::<T>());
             (*hdr).set_size(size);
+            (*hdr).type_id = small_type_id::<T>();
             ((*hdr).data() as *mut T).write(value);
 
             let val = Gc {

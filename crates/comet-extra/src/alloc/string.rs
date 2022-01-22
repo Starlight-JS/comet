@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     char::decode_utf16,
     hash::Hash,
     mem::size_of,
@@ -62,6 +63,12 @@ pub struct String<H: GcBase> {
 }
 
 impl<H: GcBase> String<H> {
+    pub fn from_str(mutator: &mut MutatorRef<H>, str: impl AsRef<str>) -> Self {
+        let str = str.as_ref();
+        let mut this = Self::with_capacity(mutator, str.len());
+        this.push_str(mutator, str);
+        this
+    }
     /// Creates a new empty `String`.
     #[inline]
     pub fn new(mutator: &mut MutatorRef<H>) -> Self {

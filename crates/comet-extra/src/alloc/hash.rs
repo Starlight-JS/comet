@@ -50,6 +50,45 @@ impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase>
         Self::with_capacity_and_hasher(mutator, capacity, DefaultHashBuilder::default())
     }
 }
+impl<Key: Trace + Eq + Hash + 'static, Value: Trace + 'static, H: GcBase, S>
+    HashMap<Key, Value, H, S>
+{
+    pub fn get<Q>(&self, key: &Q) -> Option<&Value>
+    where
+        Q: Hash + Eq + ?Sized,
+        Key: Borrow<Q>,
+        S: BuildHasher,
+    {
+        let hash = make_hash::<Key, Q, S>(&self.hash_builder, key);
+        let position = (hash % self.table.len() as u64) as usize;
+        let mut node = self.table.at(position);
+
+        while let Some(n) = node {
+            if n.hash == hash && &n.key.borrow() == &key {
+                return Some(&n.value);
+            }
+            node = &n.next;
+        }
+        None
+    }
+
+    pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value>
+    where
+        Key: Hash + Eq,
+        S: BuildHasher,
+    {
+        let hash = make_hash::<&Key, Key, S>(&self.hash_builder, key);
+        let position = (hash % self.table.len() as u64) as usize;
+        let mut node = self.table.at_mut(position);
+        while let Some(n) = node {
+            if n.hash == hash && &n.key == key {
+                return Some(&mut n.value);
+            }
+            node = &mut n.next;
+        }
+        None
+    }
+}
 impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> HashMap<Key, Value, H, S> {
     pub fn with_capacity_and_hasher(
         mutator: &mut MutatorRef<H>,
@@ -148,40 +187,6 @@ impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> HashMap<Key, Va
         self.len += 1;
     }
 
-    pub fn get(&self, key: &Key) -> Option<&Value>
-    where
-        Key: Hash + Eq,
-        S: BuildHasher,
-    {
-        let hash = make_hash::<&Key, Key, S>(&self.hash_builder, key);
-        let position = (hash % self.table.len() as u64) as usize;
-        let mut node = self.table.at(position);
-
-        while let Some(n) = node {
-            if n.hash == hash && &n.key == key {
-                return Some(&n.value);
-            }
-            node = &n.next;
-        }
-        None
-    }
-
-    pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value>
-    where
-        Key: Hash + Eq,
-        S: BuildHasher,
-    {
-        let hash = make_hash::<&Key, Key, S>(&self.hash_builder, key);
-        let position = (hash % self.table.len() as u64) as usize;
-        let mut node = self.table.at_mut(position);
-        while let Some(n) = node {
-            if n.hash == hash && &n.key == key {
-                return Some(&mut n.value);
-            }
-            node = &mut n.next;
-        }
-        None
-    }
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

@@ -697,7 +697,7 @@ impl MiniMark {
     unsafe fn write_barrier_internal(&mut self, object: *mut HeapObjectHeader) {
         if (*self.old_space).has_address(object.cast())
             || ((*object).is_precise() && (*PreciseAllocation::from_cell(object)).is_marked())
-        // mark bit in LOS object header means it is in large old object
+        // mark bit in LOS object header means it is in large old object space
         {
             if !(*object).marked_bit() {
                 self.write_barrier_slow(object);
@@ -776,7 +776,7 @@ impl MiniMark {
             let hdr = memory.cast::<HeapObjectHeader>();
             (*hdr).set_metadata(vtable_of::<T>());
             (*hdr).set_size(size);
-
+            (*hdr).type_id = small_type_id::<T>();
             ((*hdr).data() as *mut T).write(value);
             let val = Gc {
                 base: NonNull::new_unchecked(hdr),

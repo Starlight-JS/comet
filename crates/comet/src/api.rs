@@ -1,4 +1,5 @@
 use std::{
+    borrow::{Borrow, BorrowMut},
     hash::Hash,
     hint::unreachable_unchecked,
     marker::PhantomData,
@@ -648,5 +649,17 @@ unsafe impl<T: Trace> Trace for &[T] {
                 item.trace(visitor);
             }
         }
+    }
+}
+
+impl<T: Collectable, H: GcBase> Borrow<T> for Gc<T, H> {
+    fn borrow(&self) -> &T {
+        &**self
+    }
+}
+
+impl<T: Collectable, H: GcBase> BorrowMut<T> for Gc<T, H> {
+    fn borrow_mut(&mut self) -> &mut T {
+        &mut **self
     }
 }
