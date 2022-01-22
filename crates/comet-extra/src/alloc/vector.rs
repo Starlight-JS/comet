@@ -12,6 +12,7 @@ use core::sync::atomic::Ordering;
 /// `Vector` is a space-optimized GCed implementation of `alloc::vec::Vec` that is only the size of a single pointer and
 /// also extends portions of its API. In many cases, it is a drop-in replacement for the "real" `Vec`.
 #[repr(transparent)]
+#[derive(Clone)]
 pub struct Vector<T: Trace + 'static, H: GcBase> {
     storage: Gc<VectorStorage<T>, H>,
 }
