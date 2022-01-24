@@ -42,7 +42,21 @@ impl<T: Trace + 'static, H: GcBase> Vector<T, H> {
             storage: VectorStorage::create(mutator, capacity),
         }
     }
+    #[inline(never)]
+    pub fn with_default(mutator: &mut MutatorRef<H>, len: usize) -> Vector<T, H>
+    where
+        T: Default,
+    {
+        letroot!(
+            this = mutator.shadow_stack(),
+            Some(Self::with_capacity(mutator, len))
+        );
+        for _ in 0..len {
+            this.as_mut().unwrap().push(mutator, T::default());
+        }
 
+        this.take().unwrap()
+    }
     fn data(&self) -> *mut T {
         self.storage.data_start.as_ptr() as *mut T
     }
@@ -480,6 +494,20 @@ impl<T: Trace + 'static, H: GcBase> Vector<T, H> {
             core::ptr::drop_in_place(s);
         }
     }
+
+    /// Pushes value to vector without check for overflow and allocating more space.
+    ///
+    /// # Safety
+    /// Unsafe to call because it can overflow and write to unprotected memory
+    pub unsafe fn push_no_grow(&mut self, value: T) {
+        let len = self.len();
+
+        let data = self.data();
+
+        data.add(len).write(value);
+
+        self.storage.length.fetch_add(1, Ordering::AcqRel);
+    }
     /// `push` appends an element `value` to the end of the vector. `push` automatically reallocates
     /// if the vector does not have sufficient capacity.
     ///
@@ -495,7 +523,7 @@ impl<T: Trace + 'static, H: GcBase> Vector<T, H> {
 
         let data = self.data();
         unsafe {
-            data.write(value.take().unwrap());
+            data.add(len).write(value.take().unwrap_unchecked());
         }
         self.storage.length.fetch_add(1, Ordering::AcqRel);
     }

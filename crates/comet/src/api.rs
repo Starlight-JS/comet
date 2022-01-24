@@ -663,3 +663,5 @@ impl<T: Collectable, H: GcBase> BorrowMut<T> for Gc<T, H> {
         &mut **self
     }
 }
+
+unsafe impl Trace for &str {}
