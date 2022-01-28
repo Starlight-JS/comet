@@ -210,10 +210,7 @@ impl<H: GcBase> Drop for SafepointScope<H> {
 mod tests {
     use std::sync::{atomic::AtomicU32, Arc};
 
-    use crate::{
-        safepoint::SafepointScope,
-        semispace::{self},
-    };
+    use crate::{marksweep::*, safepoint::SafepointScope};
 
     const ITERATIONS: usize = 10000;
 
@@ -224,7 +221,17 @@ mod tests {
         const SAFEPOINTS: usize = 3;
         let mut safepoint_count = 0;
         super::verbose_safepoint(true);
-        let mutator = semispace::instantiate_semispace(128 * 1024);
+        let mutator = instantiate_marksweep(
+            128 * 1024,
+            128 * 1024,
+            8 * 1024,
+            128 * 1024,
+            1.8,
+            128 * 1024,
+            false,
+            1,
+            true,
+        );
         for _ in 0..RUNS {
             let counter = Arc::new(AtomicU32::new(0));
             let mut handles = Vec::new();

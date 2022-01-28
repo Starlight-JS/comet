@@ -1,5 +1,8 @@
 use super::*;
-use crate::{bitmap::SpaceBitmap, utils::mmap::Mmap};
+use crate::{
+    bitmap::{ObjectStartBitmap, SpaceBitmap},
+    utils::mmap::Mmap,
+};
 pub struct ImmixSpace {
     map: Mmap,
     pub free_blocks: BlockList,
@@ -12,7 +15,7 @@ pub struct ImmixSpace {
     pub min_heap_size: usize,
     pub max_heap_size: usize,
     pub growth_limit: usize,
-    pub mark_bitmap: SpaceBitmap<8>,
+    pub mark_bitmap: ObjectStartBitmap,
 }
 
 impl ImmixSpace {
@@ -68,7 +71,7 @@ impl ImmixSpace {
         if initial_size < min_heap_size {
             initial_size = min_heap_size;
         }
-        let bitmap = SpaceBitmap::empty();
+        let bitmap = ObjectStartBitmap::empty();
         assert!(min_heap_size <= size as usize);
         Self {
             mark_bitmap: bitmap,
@@ -86,7 +89,7 @@ impl ImmixSpace {
         }
     }
     pub fn init_bitmap(&mut self) {
-        self.mark_bitmap = SpaceBitmap::create("mark-bitmap", self.map.start(), self.map.size());
+        self.mark_bitmap = ObjectStartBitmap::new(self.map.start(), self.map.size());
     }
     pub fn reserved_pages(&self) -> usize {
         self.free_blocks.len() * PAGE_SIZE
@@ -184,7 +187,7 @@ impl ImmixSpace {
 
     /// Release dead memory after GC cycle. This function will walk all alive chunks
     /// and sweep allocated blocks in each chunk.
-    pub fn release(&self) {
+    pub fn release(&self, sweep_color: u8) {
         self.reusable_blocks.reset();
         self.free_blocks.reset();
         self.chunk_map.visit_marked_range(
@@ -192,7 +195,7 @@ impl ImmixSpace {
             self.map.end(),
             |chunk| unsafe {
                 let chunk = chunk.cast::<Chunk>();
-                (*chunk).sweep(self);
+                (*chunk).sweep(self, sweep_color);
             },
         );
     }

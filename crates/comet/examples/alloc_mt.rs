@@ -1,8 +1,8 @@
 use comet::{
     api::{Collectable, Finalize, Gc, Trace},
     gc_base::{AllocationSpace, GcBase},
+    immix::*,
     letroot,
-    minimark::{instantiate_minimark, MiniMarkOptions},
 };
 
 pub enum Node<H: GcBase> {
@@ -25,10 +25,13 @@ unsafe impl<H: GcBase> Finalize for Node<H> {}
 impl<H: GcBase> Collectable for Node<H> {}
 
 fn main() {
-    let mut opts = MiniMarkOptions::default();
-    opts.verbose = true;
-
-    let mutator = instantiate_minimark(opts);
+    let mutator = instantiate_immix(
+        ImmixOptions::default()
+            .with_verbose(1)
+            .with_heap_size(1024 * 1024 * 1024)
+            .with_max_heap_size(1024 * 1024 * 1024)
+            .with_min_heap_size(228 * 1024 * 1024),
+    );
     let mut handles = vec![];
     println!("Spawning 4 mutators");
     for _ in 0..4 {

@@ -52,13 +52,13 @@ impl Chunk {
     }
 
     /// Sweep single chunk. If chunk is empty it's entry in chunk map is cleared
-    pub fn sweep(&mut self, space: &ImmixSpace) {
+    pub fn sweep(&mut self, space: &ImmixSpace, sweep_color: u8) {
         let mut cursor = 1;
         let mut allocated_blocks = 0;
         while cursor < CHUNK_BLOCKS {
             let block = self.block(cursor);
             unsafe {
-                if !(*block).sweep(space) {
+                if !(*block).sweep(space, sweep_color) {
                     allocated_blocks += 1;
                 }
             }

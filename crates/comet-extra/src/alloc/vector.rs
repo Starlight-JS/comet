@@ -42,7 +42,7 @@ impl<T: Trace + 'static, H: GcBase> Vector<T, H> {
             storage: VectorStorage::create(mutator, capacity),
         }
     }
-    #[inline(never)]
+
     pub fn with_default(mutator: &mut MutatorRef<H>, len: usize) -> Vector<T, H>
     where
         T: Default,
@@ -51,8 +51,10 @@ impl<T: Trace + 'static, H: GcBase> Vector<T, H> {
             this = mutator.shadow_stack(),
             Some(Self::with_capacity(mutator, len))
         );
-        for _ in 0..len {
-            this.as_mut().unwrap().push(mutator, T::default());
+        unsafe {
+            for _ in 0..len {
+                this.as_mut().unwrap_unchecked().push_no_grow(T::default());
+            }
         }
 
         this.take().unwrap()

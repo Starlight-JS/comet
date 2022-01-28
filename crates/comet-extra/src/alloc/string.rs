@@ -1,5 +1,4 @@
 use std::{
-    borrow::Borrow,
     char::decode_utf16,
     hash::Hash,
     mem::size_of,

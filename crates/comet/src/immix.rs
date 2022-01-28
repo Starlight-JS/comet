@@ -11,15 +11,16 @@
 
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak, GC_BLACK, GC_WHITE},
+    bitmap::ObjectStartBitmap,
     gc_base::{
         AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoHelp, NoReadBarrier,
     },
     large_space::{LargeObjectSpace, PreciseAllocation},
     make_small_type_id,
-    mutator::{oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
+    mutator::{approximate_stack_pointer, oom_abort, JoinData, Mutator, MutatorRef, ThreadState},
     safepoint::{GlobalSafepoint, SafepointScope},
     small_type_id,
-    utils::{align_usize, formatted_size},
+    utils::{align_usize, formatted_size, stack_bounds::StackBounds},
 };
 use crate::{
     bitmap::{round_up, ChunkMap},
@@ -63,6 +64,7 @@ pub struct ImmixAllocator {
     request_for_large: bool,
     emergency_collection: bool,
     line: Option<*mut u8>,
+    bmap: *const ObjectStartBitmap,
 }
 
 impl ImmixAllocator {
@@ -186,6 +188,7 @@ where
             cursor: null_mut(),
             request_for_large: false,
             emergency_collection: false,
+            bmap: unsafe { &(*heap.get()).immix_space().mark_bitmap },
         }
     }
 }
@@ -243,7 +246,7 @@ impl ImmixAllocator {
         let result = self.cursor;
         let new_cursor = result.add(size);
 
-        if new_cursor > self.limit {
+        let res = if new_cursor > self.limit {
             if size > IMMIX_LINE_SIZE {
                 self.overflow_alloc(size)
             } else {
@@ -252,7 +255,11 @@ impl ImmixAllocator {
         } else {
             self.cursor = new_cursor;
             result
+        };
+        if !res.is_null() {
+            (*self.bmap).set_bit::<true>(res);
         }
+        res
     }
 
     unsafe fn overflow_alloc(&mut self, size: usize) -> *mut u8 {
@@ -289,7 +296,7 @@ pub struct Immix {
     pub(crate) mutators: Vec<*mut Mutator<Self>>,
     pub(crate) safepoint: GlobalSafepoint,
     pub(crate) mark_stack: Vec<*mut HeapObjectHeader>,
-    pub(crate) verbose: bool,
+    pub(crate) verbose: u8,
     pub(crate) alloc_color: u8,
     pub(crate) mark_color: u8,
     total_gcs: usize,
@@ -297,6 +304,7 @@ pub struct Immix {
     constraints: Vec<Box<dyn MarkingConstraint>>,
     finalize_list: Vector<*mut HeapObjectHeader>,
     finalize_list_lock: Lock,
+    growth_multiplier: f64,
 }
 
 impl GetImmixSpace for Immix {
@@ -305,26 +313,85 @@ impl GetImmixSpace for Immix {
     }
 }
 
-pub fn instantiate_immix(
-    size: usize,
-    initial_size: usize,
-    min_heap_size: usize,
-    max_heap_size: usize,
-    verbose: bool,
-) -> MutatorRef<Immix> {
-    let space = Box::leak(Box::new(ImmixSpace::new(
-        size,
-        initial_size,
-        min_heap_size,
-        max_heap_size,
-        verbose,
-    )));
+pub struct ImmixOptions {
+    /// Determines by how much heap grows after GC cycle. By default set to 1.75
+    pub growth_multiplier: f64,
+    /// Entire Immix heap area size. Set to 128MB by default, minimal supported value is 4MB (single chunk size)
+    pub heap_size: usize,
+    /// Initial heap size before triggering GC cycle. By default set to 32MB
+    pub initial_size: usize,
+    /// Minimal heap size before triggering GC cycle. By default set to 4MB, if `initial_size` is lesser than min_heap_size then it is set to min_heap_size.
+    pub min_heap_size: usize,
+    /// Maximal heap size before triggering GC cycle. By default set to 128MB
+    pub max_heap_size: usize,
+    /// Enables verbose loggig to stdout.
+    pub verbose: u8,
+}
 
+impl ImmixOptions {
+    /// Set growth multiplier. Panics if x <= 1
+    pub fn with_growth_multiplier(mut self, x: f64) -> ImmixOptions {
+        if x <= 1.0 {
+            panic!("Growth multiplier is too small")
+        }
+        self.growth_multiplier = x;
+        self
+    }
+
+    pub fn with_heap_size(mut self, x: usize) -> ImmixOptions {
+        if x < 4 * 1024 * 1024 {
+            panic!("Heap size too small; Minimal heap size is 1 Immix chunk which is 4MB");
+        }
+        self.heap_size = x;
+        self
+    }
+
+    pub fn with_initial_size(mut self, x: usize) -> ImmixOptions {
+        self.initial_size = x;
+        self
+    }
+
+    pub fn with_min_heap_size(mut self, x: usize) -> ImmixOptions {
+        self.min_heap_size = x;
+        self
+    }
+
+    pub fn with_max_heap_size(mut self, x: usize) -> ImmixOptions {
+        self.max_heap_size = x;
+        self
+    }
+    pub fn with_verbose(mut self, x: u8) -> ImmixOptions {
+        self.verbose = x;
+        self
+    }
+}
+impl Default for ImmixOptions {
+    fn default() -> Self {
+        Self {
+            growth_multiplier: 1.75,
+            heap_size: 128 * 1024 * 1024,
+            min_heap_size: 4 * 1024 * 1024,
+            max_heap_size: 128 * 1024 * 1024,
+            initial_size: 32 * 1024 * 1024,
+            verbose: 0,
+        }
+    }
+}
+
+pub fn instantiate_immix(options: ImmixOptions) -> MutatorRef<Immix> {
+    let space = Box::leak(Box::new(ImmixSpace::new(
+        options.heap_size,
+        options.initial_size,
+        options.min_heap_size,
+        options.max_heap_size,
+        options.verbose > 0,
+    )));
+    space.init_bitmap();
     let immix = Arc::new(UnsafeCell::new(Immix {
         space,
         large_space: LargeObjectSpace::new(),
         large_space_lock: Lock::INIT,
-        verbose,
+        verbose: options.verbose,
         global_heap_lock: Lock::INIT,
         finalize_list_lock: Lock::INIT,
         finalize_list: Vector::new(),
@@ -336,6 +403,7 @@ pub fn instantiate_immix(
         total_gcs: 0,
         weak_refs: vec![],
         constraints: vec![],
+        growth_multiplier: options.growth_multiplier,
     }));
     let href = unsafe { &mut *immix.get() };
     let join_data = JoinData::new();
@@ -348,7 +416,9 @@ pub fn instantiate_immix(
     href.safepoint
         .n_mutators
         .fetch_add(1, atomic::Ordering::Relaxed);
+    mutator.stack_bounds = StackBounds::current_thread_stack_bounds();
     mutator.state_set(ThreadState::Safe, ThreadState::Unsafe);
+
     mutator
 }
 
@@ -409,6 +479,48 @@ impl Immix {
         let value = self.allocate_raw(mutator, size, type_id, vtable);
         mutator.tlab.emergency_collection = false;
         value
+    }
+
+    unsafe fn walk_stack(&mut self, mut start: *mut *mut u8, mut end: *mut *mut u8) {
+        if end < start {
+            std::mem::swap(&mut start, &mut end);
+        }
+        let mut cursor = start;
+        while cursor < end {
+            let pointer = cursor.read();
+            if pointer.is_null() {
+                cursor = cursor.add(1);
+                continue;
+            }
+
+            if self.space.has_address(pointer) {
+                let block = ImmixBlock::from_object(pointer);
+                if (*block).state != BlockState::Unallocated {
+                    if let Some(mut header) =
+                        NonNull::new(self.space.mark_bitmap.find_header(pointer))
+                    {
+                        if self.verbose > 1 {
+                            eprintln!(
+                                "[GC] Found Immix space object {:p} from {:p} at {:p}",
+                                header, pointer, cursor
+                            );
+                        }
+                        // TODO: Pin object when we have defrag collection
+                        self.mark_object(&mut header);
+                        cursor = cursor.add(1);
+                        continue;
+                    }
+                }
+            }
+
+            if let Some(mut header) = NonNull::new(self.large_space.contains(pointer)) {
+                self.mark_object(&mut header);
+                cursor = cursor.add(1);
+                continue;
+            }
+
+            cursor = cursor.add(1);
+        }
     }
 }
 
@@ -500,10 +612,12 @@ impl GcBase for Immix {
             gced
         }
     }
+
     fn collect(&mut self, mutator: &mut MutatorRef<Self>, keep: &mut [&mut dyn Trace]) {
         match SafepointScope::new(mutator.clone()) {
             Some(safepoint) => unsafe {
-                let time = if self.verbose {
+                mutator.last_sp.set(approximate_stack_pointer());
+                let time = if self.verbose > 0 {
                     Some(std::time::Instant::now())
                 } else {
                     None
@@ -511,19 +625,25 @@ impl GcBase for Immix {
 
                 self.global_heap_lock.lock();
                 self.large_space_lock.lock();
-
+                self.large_space.prepare_for_marking(false);
+                self.large_space.prepare_for_conservative_scan();
                 self.space.prepare(true);
-                self.before_mark_constraints();
-                for object in keep {
-                    object.trace(self);
-                }
                 for i in 0..self.mutators.len() {
                     let mutator = self.mutators[i];
                     (*mutator).reset_tlab();
+                    self.walk_stack(
+                        (*mutator).stack_bounds.origin.cast(),
+                        (*mutator).last_sp.get().cast(),
+                    );
                     (*mutator).shadow_stack().walk(|entry| {
                         entry.trace(self);
                     });
                 }
+                self.before_mark_constraints();
+                for object in keep {
+                    object.trace(self);
+                }
+
                 while let Some(object) = self.mark_stack.pop() {
                     (*object).get_dyn().trace(self);
                 }
@@ -561,14 +681,14 @@ impl GcBase for Immix {
                 self.finalize_list_lock.unlock();
                 self.large_space.sweep();
                 self.large_space.prepare_for_allocation(false);
-                self.space.release();
+                self.space.release(self.alloc_color);
 
                 let bytes_allocated =
                     self.space.num_bytes_allocated.load(Ordering::Relaxed) + self.large_space.bytes;
                 let target_size = self
                     .space
                     .min_heap_size
-                    .max((bytes_allocated as f64 * 1.75) as usize)
+                    .max((bytes_allocated as f64 * self.growth_multiplier) as usize)
                     .min(self.space.max_heap_size);
 
                 self.space
@@ -672,11 +792,7 @@ impl GcBase for Immix {
         unsafe {
             let base = value.base.as_ptr();
             (*base).force_set_color(self.alloc_color);
-            if std::mem::needs_drop::<T>() {
-                self.finalize_list_lock.lock();
-                self.finalize_list.push_front(base);
-                self.finalize_list_lock.unlock();
-            }
+            self.space.mark_bitmap.set_bit::<true>(base as _);
         }
     }
 }
@@ -890,7 +1006,7 @@ impl Defrag {
 impl Drop for Immix {
     fn drop(&mut self) {
         unsafe {
-            if self.verbose {
+            if self.verbose > 0 {
                 eprintln!("Dispose immix space at {:p}", self);
             }
             Box::from_raw(self.space as *const ImmixSpace as *mut ImmixSpace);

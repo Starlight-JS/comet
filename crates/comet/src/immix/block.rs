@@ -17,7 +17,7 @@ pub enum BlockState {
 #[repr(C)]
 pub struct ImmixBlock {
     next: *mut Self,
-    state: BlockState,
+    pub state: BlockState,
     hole_count: u32,
     fragmented: bool,
 }
@@ -131,7 +131,7 @@ impl ImmixBlock {
     }
 
     /// Sweep Immix block. Returns `true` if block is dead.
-    pub fn sweep(&mut self, space: &ImmixSpace) -> bool {
+    pub fn sweep(&mut self, space: &ImmixSpace, sweep_color: u8) -> bool {
         if self.state == BlockState::Unallocated {
             // unallocated blocks go to free list instantly
             space.free_blocks.push(self as *mut Self);
@@ -140,6 +140,21 @@ impl ImmixBlock {
         let chunk = self.chunk();
         let line_mark_table = unsafe { (&*chunk).line_mark_table() };
         let mut marked_lines = 0;
+        let mut cursor = self.line(1);
+        let end = self.line(IMMIX_LINES_PER_BLOCK as u8 - 1);
+        while cursor < end {
+            unsafe {
+                // clear object bitmap from dead objects and invoke finalizers if necessary
+                if space.mark_bitmap.check_bit(cursor) {
+                    let object = cursor.cast::<HeapObjectHeader>();
+                    if (*object).get_color() == sweep_color {
+                        space.mark_bitmap.clear_bit::<false>(cursor);
+                        (*object).get_dyn().finalize();
+                    }
+                }
+                cursor = cursor.add(8);
+            }
+        }
 
         for i in 1..IMMIX_LINES_PER_BLOCK {
             // count number of marked lines so we can update num_bytes_allocated

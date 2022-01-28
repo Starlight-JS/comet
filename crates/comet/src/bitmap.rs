@@ -8,6 +8,7 @@ use atomic::Ordering;
 use core::fmt;
 use std::mem::size_of;
 use std::ptr::null_mut;
+use std::sync::atomic::AtomicU8;
 #[inline(always)]
 pub const fn round_down(x: u64, n: u64) -> u64 {
     let x = x as i64;
@@ -716,9 +717,13 @@ impl ObjectStartBitmap {
         unsafe { self.bitmap.add(index).read() }
     }
     #[inline(always)]
-    pub fn store(&self, index: usize, bit: u8) {
+    pub fn store<const ATOMIC: bool>(&self, index: usize, bit: u8) {
         unsafe {
-            self.bitmap.add(index).write(bit);
+            if !ATOMIC {
+                self.bitmap.add(index).write(bit);
+            } else {
+                (&*self.bitmap.add(index).cast::<AtomicU8>()).store(bit, Ordering::Relaxed);
+            }
         }
     }
     #[inline(always)]
@@ -730,18 +735,18 @@ impl ObjectStartBitmap {
     }
 
     #[inline(always)]
-    pub fn set_bit(&self, addr: *const u8) {
+    pub fn set_bit<const ATOMIC: bool>(&self, addr: *const u8) {
         let mut cell_index = 0;
         let mut object_bit = 0;
         self.object_start_index_and_bit(addr as _, &mut cell_index, &mut object_bit);
-        self.store(cell_index, self.load(cell_index) | (1 << object_bit));
+        self.store::<ATOMIC>(cell_index, self.load(cell_index) | (1 << object_bit));
     }
     #[inline(always)]
-    pub fn clear_bit(&self, addr: *const u8) {
+    pub fn clear_bit<const ATOMIC: bool>(&self, addr: *const u8) {
         let mut cell_index = 0;
         let mut object_bit = 0;
         self.object_start_index_and_bit(addr as _, &mut cell_index, &mut object_bit);
-        self.store(cell_index, self.load(cell_index) & !(1 << object_bit));
+        self.store::<ATOMIC>(cell_index, self.load(cell_index) & !(1 << object_bit));
     }
     pub fn check_bit(&self, addr: *const u8) -> bool {
         let mut cell_index = 0;

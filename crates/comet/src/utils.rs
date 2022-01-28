@@ -118,6 +118,7 @@ pub const fn align_usize(value: usize, align: usize) -> usize {
 
 pub mod mmap;
 pub mod retain_mut;
+pub mod stack_bounds;
 #[inline]
 pub fn which_power_of_two(value: usize) -> usize {
     value.trailing_zeros() as _

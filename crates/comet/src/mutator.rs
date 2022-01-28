@@ -15,7 +15,7 @@ use crate::{
     gc_base::{AllocationSpace, GcBase, MarkingConstraint, TLAB},
     safepoint::GlobalSafepoint,
     shadow_stack::ShadowStack,
-    utils::align_usize,
+    utils::{align_usize, stack_bounds::StackBounds},
 };
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -45,10 +45,10 @@ pub struct Mutator<H: GcBase + 'static> {
     pub(crate) tlab: H::TLAB,
 
     pub(crate) state: Atomic<ThreadState>,
-
+    pub(crate) stack_bounds: StackBounds,
     safepoint: *const GlobalSafepoint,
     safepoint_cond: *const AtomicU32,
-    last_sp: Cell<*mut *mut u8>,
+    pub(crate) last_sp: Cell<*mut *mut u8>,
     join_data: Arc<JoinDataInternal>,
     shadow_stack: ShadowStack,
     pub(crate) heap: Arc<UnsafeCell<H>>,
@@ -93,6 +93,7 @@ impl<H: 'static + GcBase> Mutator<H> {
         heap.attach_current_thread(&mut *mutator);
         drop(state);
         std::thread::spawn(move || {
+            mutator.stack_bounds = StackBounds::current_thread_stack_bounds();
             mutator.state_set(ThreadState::Safe, ThreadState::Unsafe);
             closure(mutator.clone());
             mutator.stop();
@@ -112,6 +113,10 @@ impl<H: 'static + GcBase> Mutator<H> {
         Mutator {
             heap: heap.clone(),
             safepoint,
+            stack_bounds: StackBounds {
+                origin: null_mut(),
+                bound: null_mut(),
+            },
             safepoint_cond: unsafe { &(&*safepoint).gc_running },
             state: Atomic::new(ThreadState::Unsafe),
             tlab: H::TLAB::create(heap),
@@ -306,7 +311,7 @@ impl<H: GcBase> MutatorRef<H> {
 }
 
 #[inline(always)]
-fn approximate_stack_pointer() -> *mut *mut u8 {
+pub fn approximate_stack_pointer() -> *mut *mut u8 {
     let mut result = null_mut();
     result = &mut result as *mut *mut *mut u8 as *mut *mut u8;
     result

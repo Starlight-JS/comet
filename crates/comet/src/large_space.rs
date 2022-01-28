@@ -311,6 +311,7 @@ impl LargeObjectSpace {
                 if (*allocation).is_empty() {
                     self.bytes -= (*allocation).cell_size();
                     freed += (*allocation).cell_size();
+                    (*(*allocation).cell()).get_dyn().finalize();
                     (*allocation).destroy();
 
                     continue;

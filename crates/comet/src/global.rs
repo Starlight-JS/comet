@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use crate::{
     api::{Collectable, Gc, Weak},
     gc_base::AllocationSpace,
-    immix::{self, Immix},
+    immix::{self, Immix, ImmixOptions},
     mutator::{JoinData, MutatorRef},
 };
 
@@ -17,25 +17,13 @@ static INIT: AtomicBool = AtomicBool::new(false);
 ///
 /// # Panics
 /// Panics is GC state is already initialized.
-pub fn global_initialize(
-    heap_size: usize,
-    initial_size: usize,
-    min_free: usize,
-    max_free: usize,
-    verbose: bool,
-) -> MutatorRef<Immix> {
+pub fn global_initialize(opts: ImmixOptions) -> MutatorRef<Immix> {
     if INIT.load(atomic::Ordering::Acquire) {
         panic!("global GC is already initialized");
     }
 
     unsafe {
-        MUTATOR = Some(immix::instantiate_immix(
-            heap_size,
-            initial_size,
-            min_free,
-            max_free,
-            verbose,
-        ));
+        MUTATOR = Some(immix::instantiate_immix(opts));
         MUTATOR.as_ref().unwrap().clone()
     }
 }
