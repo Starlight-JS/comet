@@ -11,7 +11,7 @@
 
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak, GC_BLACK, GC_WHITE},
-    bitmap::ObjectStartBitmap,
+    bitmap::{ObjectStartBitmap, SpaceBitmap},
     gc_base::{
         AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoHelp, NoReadBarrier,
     },
@@ -21,6 +21,7 @@ use crate::{
     safepoint::{GlobalSafepoint, SafepointScope},
     small_type_id,
     utils::{align_usize, formatted_size, stack_bounds::StackBounds},
+    ConstantId,
 };
 use crate::{
     bitmap::{round_up, ChunkMap},
@@ -64,7 +65,7 @@ pub struct ImmixAllocator {
     request_for_large: bool,
     emergency_collection: bool,
     line: Option<*mut u8>,
-    bmap: *const ObjectStartBitmap,
+    bmap: *const SpaceBitmap<8>,
 }
 
 impl ImmixAllocator {
@@ -242,6 +243,7 @@ impl ImmixAllocator {
         }
         result
     }
+    #[inline]
     pub unsafe fn alloc(&mut self, size: usize) -> *mut u8 {
         let result = self.cursor;
         let new_cursor = result.add(size);
@@ -257,11 +259,11 @@ impl ImmixAllocator {
             result
         };
         if !res.is_null() {
-            (*self.bmap).set_bit::<true>(res);
+            (*self.bmap).set(res);
         }
         res
     }
-
+    #[inline(never)]
     unsafe fn overflow_alloc(&mut self, size: usize) -> *mut u8 {
         let start = self.large_cursor;
         let end = start.add(size);
@@ -493,7 +495,7 @@ impl Immix {
                 continue;
             }
 
-            if self.space.has_address(pointer) {
+            if self.space.has_address(pointer) && pointer as usize % 8 == 0 {
                 let block = ImmixBlock::from_object(pointer);
                 if (*block).state != BlockState::Unallocated {
                     if let Some(mut header) =
@@ -585,6 +587,7 @@ impl GcBase for Immix {
         }
         weak_ref
     }
+    #[inline]
     fn alloc_inline<T: Collectable + Sized + 'static>(
         &mut self,
         mutator: &mut MutatorRef<Self>,
@@ -601,7 +604,7 @@ impl GcBase for Immix {
             }
             let object = memory.cast::<HeapObjectHeader>();
             (*object).set_metadata(vtable_of::<T>());
-            (*object).type_id = small_type_id::<T>();
+            (*object).type_id = ConstantId::<T>::ID;
             (*object).set_size(size);
             ((*object).data() as *mut T).write(value);
             let gced = Gc {
@@ -792,7 +795,7 @@ impl GcBase for Immix {
         unsafe {
             let base = value.base.as_ptr();
             (*base).force_set_color(self.alloc_color);
-            self.space.mark_bitmap.set_bit::<true>(base as _);
+            //self.space.mark_bitmap.set<true>(base as _);
         }
     }
 }

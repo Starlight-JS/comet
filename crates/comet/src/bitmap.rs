@@ -154,7 +154,7 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
     }
 
     pub fn find_header(
-        &mut self,
+        &self,
         address_maybe_pointing_to_the_middle_of_object: *const u8,
     ) -> *mut HeapObjectHeader {
         let address_maybe_pointing_to_the_middle_of_object =
@@ -759,6 +759,7 @@ impl ObjectStartBitmap {
         let mut object_start_number = object_offset / MIN_ALLOCATION;
         let mut cell_index = object_start_number / Self::BITS_PER_CELL;
         let bit = object_start_number & Self::CELL_MASK;
+        println!("{:p}", addr_in_middle);
         let mut byte = self.load(cell_index) & ((1 << (bit + 1)) - 1);
         while byte == 0 && cell_index != 0 {
             cell_index -= 1;

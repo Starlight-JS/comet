@@ -10,7 +10,7 @@ fn main() {
     );
 
     let mut map = HashMap::new(&mut heap);
-    map.insert(&mut heap, 0, 1);
+    map.insert(&mut heap, 0i32, 1i32);
     map.insert(&mut heap, 1, 2);
     map.insert(&mut heap, 2, 3);
     println!("{}", map.get(&2).unwrap());

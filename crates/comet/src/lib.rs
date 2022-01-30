@@ -55,7 +55,7 @@ pub mod space;
 pub mod sticky_immix;
 pub mod tlab;
 pub mod waitlists;
-use std::any::TypeId;
+use std::{any::TypeId, marker::PhantomData};
 
 pub use mopa;
 
@@ -133,4 +133,10 @@ macro_rules! gc_offsetof {
             faddr - 0x4000
         }
     };
+}
+
+pub struct ConstantId<T>(PhantomData<T>);
+
+impl<T: 'static> ConstantId<T> {
+    pub const ID: u32 = small_type_id::<T>();
 }

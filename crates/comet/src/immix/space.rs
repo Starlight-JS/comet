@@ -15,7 +15,7 @@ pub struct ImmixSpace {
     pub min_heap_size: usize,
     pub max_heap_size: usize,
     pub growth_limit: usize,
-    pub mark_bitmap: ObjectStartBitmap,
+    pub mark_bitmap: SpaceBitmap<8>,
 }
 
 impl ImmixSpace {
@@ -71,7 +71,7 @@ impl ImmixSpace {
         if initial_size < min_heap_size {
             initial_size = min_heap_size;
         }
-        let bitmap = ObjectStartBitmap::empty();
+        let bitmap = SpaceBitmap::empty();
         assert!(min_heap_size <= size as usize);
         Self {
             mark_bitmap: bitmap,
@@ -89,7 +89,7 @@ impl ImmixSpace {
         }
     }
     pub fn init_bitmap(&mut self) {
-        self.mark_bitmap = ObjectStartBitmap::new(self.map.start(), self.map.size());
+        self.mark_bitmap = SpaceBitmap::create("immix", self.map.start(), self.map.size());
     }
     pub fn reserved_pages(&self) -> usize {
         self.free_blocks.len() * PAGE_SIZE
