@@ -76,7 +76,9 @@ impl<T: Trace + 'static, H: GcBase> Vector<T, H> {
             core::ptr::copy_nonoverlapping(self.data(), temp.data_start.as_mut_ptr(), len);
         }
         mutator.write_barrier(temp.to_dyn());
+
         self.storage = temp;
+        self.storage.length.store(len as _, Ordering::Relaxed);
     }
 
     pub fn capacity(&self) -> usize {
