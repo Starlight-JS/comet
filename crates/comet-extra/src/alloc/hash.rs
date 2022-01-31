@@ -38,7 +38,13 @@ pub struct HashMap<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S = 
 }
 
 pub type DefaultHashBuilder = ahash::RandomState;
-
+unsafe impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> Trace
+    for HashMap<Key, Value, H, S>
+{
+    fn trace(&mut self, _vis: &mut dyn comet::api::Visitor) {
+        self.table.trace(_vis);
+    }
+}
 impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase>
     HashMap<Key, Value, H, DefaultHashBuilder>
 {
@@ -337,13 +343,6 @@ where
     hash_builder.hash_one(val)
 }
 
-unsafe impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> Trace
-    for HashMap<Key, Value, H, S>
-{
-    fn trace(&mut self, vis: &mut dyn comet::api::Visitor) {
-        self.table.trace(vis);
-    }
-}
 unsafe impl<Key: Trace + 'static, Value: Trace + 'static, H: GcBase, S> Finalize
     for HashMap<Key, Value, H, S>
 {

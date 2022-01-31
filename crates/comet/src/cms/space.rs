@@ -1,6 +1,6 @@
 use crate::bitmap::round_up;
 
-use super::block::{Block, ATOM_SIZE, BLOCK_PAYLOAD};
+use super::block::{ATOM_SIZE, BLOCK_PAYLOAD};
 /// The largest cell we're willing to allocate in a [Block] the "normal way" (i.e. using size
 /// classes, rather than a large allocation) is half the size of the payload, rounded down. This
 /// ensures that we only use the size class approach if it means being able to pack two things

@@ -35,6 +35,7 @@ impl<T: Trace + 'static> Array<T> {
         for i in 0..len {
             this[i] = T::default();
         }
+        this.is_inited = true;
         mutator.write_barrier(this.to_dyn());
         this
     }

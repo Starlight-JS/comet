@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    bitmap::{ObjectStartBitmap, SpaceBitmap},
-    utils::mmap::Mmap,
-};
+use crate::{bitmap::SpaceBitmap, utils::mmap::Mmap};
 pub struct ImmixSpace {
     map: Mmap,
     pub free_blocks: BlockList,

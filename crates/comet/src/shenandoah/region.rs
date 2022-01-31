@@ -2,10 +2,7 @@ use std::{mem::size_of, sync::atomic::AtomicPtr};
 
 use atomic::Atomic;
 
-use crate::{
-    shenandoah::region,
-    utils::{align_down, align_up, align_usize, formatted_size},
-};
+use crate::utils::{align_down, align_up, align_usize, formatted_size};
 
 /*
  Region state is described by a state machine. Transitions are guarded by
@@ -69,6 +66,7 @@ use crate::{
    i) Empty cannot go Trash, avoiding useless work;
    j) ...
 */
+#[allow(dead_code)]
 pub struct ShenandoahHeapRegion {
     index: usize,
     bottom: *mut u8,

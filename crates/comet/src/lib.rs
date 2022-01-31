@@ -41,6 +41,7 @@ pub mod api;
 pub mod bitmap;
 pub mod bump_pointer_space;
 pub mod card_table;
+#[allow(dead_code)]
 pub mod cms;
 pub mod gc_base;
 pub mod global;
@@ -50,6 +51,7 @@ pub mod marksweep;
 pub mod mutator;
 pub mod rosalloc_space;
 pub mod safepoint;
+#[allow(dead_code)]
 pub mod shenandoah;
 pub mod space;
 pub mod sticky_immix;

@@ -11,7 +11,7 @@
 
 use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak, GC_BLACK, GC_WHITE},
-    bitmap::{ObjectStartBitmap, SpaceBitmap},
+    bitmap::SpaceBitmap,
     gc_base::{
         AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoHelp, NoReadBarrier,
     },
@@ -498,9 +498,10 @@ impl Immix {
             if self.space.has_address(pointer) && pointer as usize % 8 == 0 {
                 let block = ImmixBlock::from_object(pointer);
                 if (*block).state != BlockState::Unallocated {
-                    if let Some(mut header) =
-                        NonNull::new(self.space.mark_bitmap.find_header(pointer))
-                    {
+                    /*if let Some(mut header) =
+                    NonNull::new(self.space.mark_bitmap.find_header(pointer))*/
+                    if self.space.mark_bitmap.test(pointer) {
+                        let mut header = NonNull::new_unchecked(pointer.cast::<HeapObjectHeader>());
                         if self.verbose > 1 {
                             eprintln!(
                                 "[GC] Found Immix space object {:p} from {:p} at {:p}",
