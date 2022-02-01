@@ -96,7 +96,7 @@ impl<H: 'static + GcBase> Mutator<H> {
             mutator.stack_bounds = StackBounds::current_thread_stack_bounds();
             mutator.state_set(ThreadState::Safe, ThreadState::Unsafe);
             closure(mutator.clone());
-            mutator.stop();
+
             drop(mutator);
         });
 
