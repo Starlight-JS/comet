@@ -67,6 +67,10 @@ pub trait Collectable: Trace + Finalize + mopa::Any {
     fn allocation_size(&self) -> usize {
         std::mem::size_of_val(self)
     }
+    #[doc(hidden)]
+    fn type_name(&self) -> &'static str {
+        std::any::type_name_of_val(self)
+    }
 }
 
 mopafy!(Collectable);
@@ -274,6 +278,13 @@ impl<T: Collectable + Sized, H: GcBase> Gc<MaybeUninit<T>, H> {
     }
 }
 impl<T: Collectable + ?Sized, H: GcBase> Gc<T, H> {
+    pub fn get_dyn(&self) -> &dyn Collectable {
+        unsafe { (*self.base.as_ptr()).get_dyn() }
+    }
+
+    pub fn get_dyn_mut(&mut self) -> &mut dyn Collectable {
+        unsafe { (*self.base.as_ptr()).get_dyn() }
+    }
     /// Coerce this GC pointer to dyn Collectable.
     #[inline]
     pub fn to_dyn(self) -> Gc<dyn Collectable, H> {
