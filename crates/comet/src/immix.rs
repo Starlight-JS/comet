@@ -542,7 +542,23 @@ impl GcBase for Immix {
         self.constraints.push(Box::new(constraint));
         self.global_unlock();
     }
-
+    fn inspect(&self, mut f: impl FnMut(Gc<dyn Collectable, Self>) -> bool) -> bool {
+        unsafe {
+            self.large_space_lock.lock();
+            self.large_space.allocations.iter().for_each(|alloc| {
+                f(std::mem::transmute((**alloc).cell()));
+            });
+            self.large_space_lock.unlock();
+            let start = self.immix_space().map.start();
+            let end = self.immix_space().map.end();
+            self.immix_space()
+                .mark_bitmap
+                .visit_marked_range(start, end, |ptr| {
+                    f(std::mem::transmute(ptr));
+                });
+        }
+        true
+    }
     fn allocate_raw(
         &mut self,
         mutator: &mut MutatorRef<Self>,

@@ -263,7 +263,7 @@ pub(crate) fn vtable_of<T: Collectable>() -> DynMetadata<dyn Collectable> {
 ///
 pub struct Gc<T: Collectable + ?Sized, H: GcBase> {
     pub(crate) base: NonNull<HeapObjectHeader>,
-    pub(crate) marker: PhantomData<(Box<T>, H)>,
+    pub(crate) marker: PhantomData<(NonNull<T>, NonNull<H>)>,
 }
 impl<T: Collectable + Sized, H: GcBase> Gc<MaybeUninit<T>, H> {
     pub unsafe fn assume_init(self) -> Gc<T, H> {

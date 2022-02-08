@@ -1,6 +1,6 @@
 use std::{mem::size_of, sync::atomic::AtomicU32};
 
-use comet::letroot;
+use comet::{gc_offsetof, letroot};
 
 use crate::{
     api::{Collectable, Finalize, Gc, Trace},
@@ -18,6 +18,9 @@ pub struct Vector<T: Trace + 'static, H: GcBase> {
 }
 
 impl<T: Trace + 'static, H: GcBase> Vector<T, H> {
+    pub fn data_offset() -> usize {
+        gc_offsetof!(VectorStorage<T>, data_start)
+    }
     /// Inserts GC write barrier. Must be invoked after each write to vector.
     pub fn write_barrier(&mut self, mutator: &mut MutatorRef<H>) {
         mutator.write_barrier(self.storage.to_dyn());

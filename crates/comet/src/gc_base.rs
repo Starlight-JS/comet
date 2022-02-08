@@ -36,7 +36,10 @@ pub trait GcBase: Sized + 'static {
 
     fn inline_allocation_helpers(&self) -> Self::InlineAllocationHelpers;
     fn add_constraint<T: MarkingConstraint + 'static>(&mut self, constraint: T);
-
+    fn inspect(&self, f: impl FnMut(Gc<dyn Collectable, Self>) -> bool) -> bool {
+        let _ = f;
+        false
+    }
     /// Allocates `size` bytes on heap and creates object header with `type_id` and `vtable`. This function can be used to allocate dyn sized arrays or strings.
     fn allocate_raw(
         &mut self,

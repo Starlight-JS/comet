@@ -1,7 +1,7 @@
 use super::*;
 use crate::{bitmap::SpaceBitmap, utils::mmap::Mmap};
 pub struct ImmixSpace {
-    map: Mmap,
+    pub map: Mmap,
     pub free_blocks: BlockList,
     pub reusable_blocks: BlockList,
     pub n_chunks: usize,

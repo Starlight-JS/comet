@@ -127,7 +127,7 @@ pub(crate) const fn make_small_type_id(id: TypeId) -> u32 {
 /// NULL can cause compiler problems, especially in cases of multiple inheritance
 #[macro_export]
 macro_rules! gc_offsetof {
-    ($name : ident. $($field: ident).*) => {
+    ($name : path, $($field: ident).*) => {
         unsafe {
             let uninit = std::mem::transmute::<_,$crate::api::Gc<$name,$crate::marksweep::MarkSweep>>(0x4000usize);
             let fref = &uninit.$($field).*;
