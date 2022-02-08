@@ -13,7 +13,7 @@ use parking_lot::{Condvar, Mutex};
 use crate::{
     api::{Collectable, Finalize, Gc, HeapObjectHeader, Trace, Weak},
     gc_base::{AllocationSpace, GcBase, MarkingConstraint, TLAB},
-    safepoint::GlobalSafepoint,
+    safepoint::{GlobalSafepoint, SafepointScope},
     shadow_stack::ShadowStack,
     utils::{align_usize, stack_bounds::StackBounds},
 };
@@ -206,6 +206,18 @@ impl<H: 'static + GcBase> Mutator<H> {
 }
 
 impl<H: GcBase> MutatorRef<H> {
+    pub fn inspect(&self, f: impl FnMut(Gc<dyn Collectable, H>) -> bool) -> bool {
+        loop {
+            match SafepointScope::new(self.clone()) {
+                Some(safepoint) => {
+                    let res = self.heap_ref().inspect(f);
+                    drop(safepoint);
+                    break res;
+                }
+                None => continue,
+            }
+        }
+    }
     pub fn write_barrier(&mut self, object: Gc<dyn Collectable, H>) {
         let heap = unsafe { &mut *self.heap.get() };
         heap.write_barrier(self, object);
