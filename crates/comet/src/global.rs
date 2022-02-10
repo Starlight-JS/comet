@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 
 use crate::{
     api::{Collectable, Gc, Weak},
-    gc_base::AllocationSpace,
+    gc_base::{AllocationSpace, NoOpStackDecoder},
     immix::{self, Immix, ImmixOptions},
     mutator::{JoinData, MutatorRef},
 };
@@ -23,7 +23,7 @@ pub fn global_initialize(opts: ImmixOptions) -> MutatorRef<Immix> {
     }
 
     unsafe {
-        MUTATOR = Some(immix::instantiate_immix(opts));
+        MUTATOR = Some(immix::instantiate_immix::<NoOpStackDecoder>(opts));
         MUTATOR.as_ref().unwrap().clone()
     }
 }

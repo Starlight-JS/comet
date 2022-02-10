@@ -13,7 +13,8 @@ use crate::{
     api::{vtable_of, Collectable, Gc, HeapObjectHeader, Trace, Visitor, Weak, GC_BLACK, GC_WHITE},
     bitmap::SpaceBitmap,
     gc_base::{
-        AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoHelp, NoReadBarrier,
+        AllocationSpace, GcBase, MarkingConstraint, MarkingConstraintRuns, NoHelp,
+        NoOpStackDecoder, NoReadBarrier, StackValueDecoder,
     },
     large_space::{LargeObjectSpace, PreciseAllocation},
     make_small_type_id,
@@ -290,7 +291,7 @@ impl ImmixAllocator {
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 
 /// Immix GC implementation. Read top level module documentation for more information
-pub struct Immix {
+pub struct Immix<Decoder: 'static + StackValueDecoder = NoOpStackDecoder> {
     space: &'static ImmixSpace,
     pub(crate) global_heap_lock: Lock,
     pub(crate) large_space_lock: Lock,
@@ -309,7 +310,7 @@ pub struct Immix {
     growth_multiplier: f64,
 }
 
-impl GetImmixSpace for Immix {
+impl<Decoder: StackValueDecoder> GetImmixSpace for Immix<Decoder> {
     fn immix_space(&self) -> &'static ImmixSpace {
         self.space
     }
@@ -380,7 +381,9 @@ impl Default for ImmixOptions {
     }
 }
 
-pub fn instantiate_immix(options: ImmixOptions) -> MutatorRef<Immix> {
+pub fn instantiate_immix<Decoder: StackValueDecoder>(
+    options: ImmixOptions,
+) -> MutatorRef<Immix<Decoder>> {
     let space = Box::leak(Box::new(ImmixSpace::new(
         options.heap_size,
         options.initial_size,
@@ -424,7 +427,7 @@ pub fn instantiate_immix(options: ImmixOptions) -> MutatorRef<Immix> {
     mutator
 }
 
-impl Immix {
+impl<Decoder: StackValueDecoder> Immix<Decoder> {
     unsafe fn after_mark_constraints(&mut self) {
         let this = self as *mut Self;
         (*this).constraints.retain_mut(|constraint| {
@@ -494,7 +497,7 @@ impl Immix {
                 cursor = cursor.add(1);
                 continue;
             }
-
+            let pointer = Decoder::decode(pointer);
             if self.space.has_address(pointer) && pointer as usize % 8 == 0 {
                 let block = ImmixBlock::from_object(pointer);
                 if (*block).state != BlockState::Unallocated {
@@ -527,7 +530,7 @@ impl Immix {
     }
 }
 
-impl GcBase for Immix {
+impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
     type TLAB = ImmixAllocator;
     const SUPPORTS_TLAB: bool = false;
     type ReadBarrier = NoReadBarrier;
@@ -817,7 +820,7 @@ impl GcBase for Immix {
     }
 }
 
-impl Visitor for Immix {
+impl<Decoder: StackValueDecoder> Visitor for Immix<Decoder> {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>) {
         let object = root.as_ptr();
         unsafe {
@@ -1023,7 +1026,7 @@ impl Defrag {
     }
 }*/
 
-impl Drop for Immix {
+impl<Decoder: StackValueDecoder> Drop for Immix<Decoder> {
     fn drop(&mut self) {
         unsafe {
             if self.verbose > 0 {

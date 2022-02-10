@@ -243,3 +243,18 @@ impl<H: GcBase> ReadBarrier<H> for BrooksPointer {
         }
     }
 }
+
+/// Stack value decoder. Some GC policies allow to pass it as a generic parameter in order
+/// to decode values on stack. Useful when your runtime nan-boxes values or pointer tags them.
+pub trait StackValueDecoder {
+    fn decode(ptr: *mut u8) -> *mut u8;
+}
+
+/// No-op stack value decoder.
+pub struct NoOpStackDecoder;
+
+impl StackValueDecoder for NoOpStackDecoder {
+    fn decode(ptr: *mut u8) -> *mut u8 {
+        ptr
+    }
+}
