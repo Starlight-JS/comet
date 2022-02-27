@@ -147,6 +147,7 @@ impl ImmixBlock {
             .visit_marked_range(start, end, |object| unsafe {
                 if (*object).get_color() == sweep_color {
                     space.mark_bitmap.clear(object as _);
+                    (*object).get_dyn().finalize();
                     debug_assert!(!space.mark_bitmap.test(object as _));
                 } else {
                     debug_assert!(space.mark_bitmap.test(object as _));

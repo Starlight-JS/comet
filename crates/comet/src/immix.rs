@@ -305,8 +305,6 @@ pub struct Immix<Decoder: 'static + StackValueDecoder = NoOpStackDecoder> {
     total_gcs: usize,
     weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
-    finalize_list: Vector<*mut HeapObjectHeader>,
-    finalize_list_lock: Lock,
     growth_multiplier: f64,
 }
 
@@ -398,8 +396,7 @@ pub fn instantiate_immix<Decoder: StackValueDecoder>(
         large_space_lock: Lock::INIT,
         verbose: options.verbose,
         global_heap_lock: Lock::INIT,
-        finalize_list_lock: Lock::INIT,
-        finalize_list: Vector::new(),
+
         mutators: vec![],
         safepoint: GlobalSafepoint::new(),
         alloc_color: GC_WHITE,
@@ -690,18 +687,7 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
                         false
                     }
                 });
-                self.finalize_list_lock.lock();
-                self.finalize_list.retain(|object| {
-                    let object = *object;
-                    // if objecct is unmarked we invoke finalizer.
-                    if (*object).get_color() != mark_color {
-                        (*object).get_dyn().finalize();
-                        false
-                    } else {
-                        true
-                    }
-                });
-                self.finalize_list_lock.unlock();
+
                 self.large_space.sweep();
                 self.large_space.prepare_for_allocation(false);
                 self.space.release(self.alloc_color);
