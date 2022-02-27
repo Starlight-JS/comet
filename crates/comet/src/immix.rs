@@ -645,6 +645,7 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
 
                 self.global_heap_lock.lock();
                 self.large_space_lock.lock();
+                let mark_phase = std::time::Instant::now();
                 self.large_space.prepare_for_marking(false);
                 self.large_space.prepare_for_conservative_scan();
                 self.space.prepare(true);
@@ -668,10 +669,12 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
                     (*object).get_dyn().trace(self);
                 }
                 self.after_mark_constraints();
+                let mark_phase = mark_phase.elapsed();
                 let prev =
                     self.space.num_bytes_allocated.load(Ordering::Relaxed) + self.large_space.bytes;
                 self.space.num_bytes_allocated.store(0, Ordering::Relaxed);
                 let mark_color = self.mark_color;
+                let sweep_phase = std::time::Instant::now();
                 self.weak_refs.retain_mut(|object| {
                     let header = object.base();
                     if (*header).get_color() == mark_color {
@@ -703,15 +706,18 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
                 self.space
                     .target_footprint
                     .store(target_size, Ordering::Relaxed);
+                let sweep_phase = sweep_phase.elapsed();
                 if let Some(time) = time {
                     let elapsed = time.elapsed();
                     eprintln!(
-                        "[gc] GC({}) Pause Immix collection {}->{}({}) {:.4}ms",
+                        "[gc] GC({}) Pause Immix collection {}->{}({}) {:.4}ms (mark {:.4}ms, sweep {:.4}ms)",
                         self.total_gcs,
                         formatted_size(prev),
                         formatted_size(bytes_allocated),
                         formatted_size(target_size),
-                        elapsed.as_micros() as f64 / 1000.0
+                        elapsed.as_micros() as f64 / 1000.0,
+                        mark_phase.as_micros() as f64 / 1000.0,
+                        sweep_phase.as_micros() as f64 / 1000.0
                     );
                 }
                 self.total_gcs += 1;
